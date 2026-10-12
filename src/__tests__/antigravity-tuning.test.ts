@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { createAntigravityServer } from "../proxy/backends/antigravity"
 import { AntigravityRuntime } from "../proxy/backends/antigravityRuntime"
 import { DEFAULT_PROXY_CONFIG, resolveBackendConfig } from "../proxy/types"
+import { dropAgSamplingControls } from "../proxy/backends/antigravityProtocol"
 
 type TestReply = { content: Array<{ type: string; text?: string; id?: string; name?: string }>; stop_reason?: string }
 async function decode(response: Response): Promise<TestReply> { return await response.json() as TestReply }
@@ -98,6 +99,33 @@ describe("Antigravity operator tuning", () => {
     expect((await decode(structured)).content[0]!.text).toBe(JSON.stringify({ answer: "READY" }))
     const standard = fixture()
     expect((await standard.send(text("DEFAULT_AGENT_PROBE"))).status).toBe(200)
+  })
+
+  it("refuses sampling settings by default and drops them only when the operator opts in", async () => {
+    const chat = (server: ReturnType<typeof fixture>["server"], body: object, path = "/v1/chat/completions") => server.app.fetch(new Request("http://local" + path, { method: "POST", body: JSON.stringify(body) }))
+    const messages = [{ role: "user", content: "hello" }]
+    const strict = fixture()
+    const refused = await strict.send(text("hello", { temperature: 0.7 }))
+    expect(refused.status).toBe(400)
+    expect(await refused.text()).toContain("does not support temperature")
+    expect((await chat(strict.server, { model: "fixture-model", messages, temperature: 0.7 })).status).toBe(400)
+    expect((await chat(strict.server, { model: "fixture-model", messages, seed: 7 })).status).toBe(400)
+
+    const lenient = fixture({ ignoreSamplingControls: true })
+    expect((await decode(await lenient.send(text("hello", { temperature: 0.7, top_p: 0.9, top_k: 40 })))).content[0]!.text).toBe("READY")
+    const completion = await chat(lenient.server, { model: "fixture-model", messages, temperature: 0.2, top_p: 0.9, presence_penalty: 0.5, frequency_penalty: 0.5, repetition_penalty: 1.1, seed: 7, logit_bias: { "50256": -100 }, min_p: 0.05, typical_p: 0.9, top_k: 40 })
+    expect(completion.status).toBe(200)
+    expect(((await completion.json()) as { choices: Array<{ message: { content: string } }> }).choices[0]!.message.content).toBe("READY")
+    expect((await chat(lenient.server, { model: "fixture-model", input: "hello", temperature: 0.2, top_p: 0.9 }, "/v1/responses")).status).toBe(200)
+    // Settings that change what the client gets back are still refused.
+    expect((await chat(lenient.server, { model: "fixture-model", messages, logprobs: true })).status).toBe(400)
+    expect((await chat(lenient.server, { model: "fixture-model", messages, n: 2 })).status).toBe(400)
+  })
+
+  it("drops only top-level sampling fields", () => {
+    const body = { model: "m", temperature: 1, seed: 3, messages: [{ role: "user", content: "temperature" }], tools: [{ name: "set", input_schema: { type: "object", properties: { temperature: { type: "number" }, seed: { type: "integer" } } } }], metadata: { top_p: "kept" } }
+    expect(dropAgSamplingControls(body)).toEqual({ model: "m", messages: body.messages, tools: body.tools, metadata: body.metadata })
+    for (const value of [null, "text", 7, [{ temperature: 1 }]]) expect(dropAgSamplingControls(value)).toEqual(value)
   })
 
   it("retains a completed conversation for the idle lifetime rather than the tool deadline", async () => {
