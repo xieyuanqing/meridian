@@ -141,7 +141,47 @@ export function stable(value: unknown): string {
   return JSON.stringify(value) ?? "null"
 }
 export function historyKey(messages: AgMessage[]): string {
-  return stable(messages.map(m => ({ role: m.role, content: blocks(m) })))
+  // The CLI ends its text with a newline and clients commonly trim what they
+  // store, so whitespace at the edges of assistant text is not history. Without
+  // this, every new user turn of such a client misses its live conversation.
+  return stable(messages.map(m => ({ role: m.role, content: m.role === "assistant" ? blocks(m).map(b => b.type === "text" ? { ...b, text: b.text.trim() } : b).filter(b => b.type !== "text" || b.text) : blocks(m) })))
+}
+/** The CLI keeps the first 192,000 bytes of a user message and silently drops the rest. */
+export const AG_CLI_MESSAGE_BYTES = 192_000
+const AG_PART_FRAME_BYTES = 512
+/**
+ * Never hand the CLI a message it would cut. A request above one message is
+ * delivered as consecutive messages the CLI acknowledges in turn; a request
+ * above the whole budget is refused so the client can compact its history.
+ */
+export function splitAgPrompt(text: string, messageBytes: number, requestBytes: number): string[] {
+  const bytes = Buffer.byteLength(text)
+  // Both phrases are ones clients and gateways already treat as a caller-side
+  // overflow to compact, not an upstream fault to retry. Sizes are in KB so no figure reads as a token window.
+  if (bytes > requestBytes) throw new AntigravityError(`prompt is too long: context length exceeded for one Antigravity request (${Math.ceil(bytes / 1024)} KB rendered, up to ${Math.floor(requestBytes / 1024)} KB carried); compact or shorten the conversation`)
+  if (bytes <= messageBytes) return [text]
+  const budget = messageBytes - AG_PART_FRAME_BYTES
+  const pieces: string[] = []
+  let rest = text
+  while (Buffer.byteLength(rest) > budget) {
+    let low = 0, high = Math.min(rest.length, budget)
+    while (low < high) {
+      const middle = (low + high + 1) >> 1
+      if (Buffer.byteLength(rest.slice(0, middle)) <= budget) low = middle
+      else high = middle - 1
+    }
+    // Prefer the start of a conversation message; never split a surrogate pair.
+    const boundary = rest.lastIndexOf(',{"role":"', low - 1)
+    if (boundary > low / 2) low = boundary + 1
+    else if ((rest.charCodeAt(low - 1) & 0xfc00) === 0xd800) low--
+    pieces.push(rest.slice(0, low))
+    rest = rest.slice(low)
+  }
+  pieces.push(rest)
+  const total = pieces.length
+  return pieces.map((piece, index) => (index < total - 1
+    ? `Meridian request part ${index + 1} of ${total}. This request is longer than one CLI message, so it arrives as ${total} consecutive messages that join, in order and without separators, into one request. Keep this part in context. Do not answer the client and do not call any tool yet. Reply with exactly: OK`
+    : `Meridian request part ${total} of ${total} (final). It continues exactly where part ${total - 1} ended. Now follow the complete request and answer the client's latest user message, the last entry of the conversation.`) + "\n\n" + piece)
 }
 export function contractKey(request: AgRequest): string {
   return stable({ session: request.meridian_session_key, grammars: request.meridian_tool_grammars, model: request.model, system: request.system, tools: request.tools, max_tokens: request.max_tokens, thinking: request.thinking, stop_sequences: request.stop_sequences, output_config: request.output_config })
@@ -176,8 +216,9 @@ export function toolChoiceInstruction(request: AgRequest): string {
 export function renderAgPrompt(request: AgRequest, nativeTools: string[] = []): string {
   return [
     "You are serving a client through Meridian. Follow the client's instructions and answer its latest user message.",
-    "The JSON below is the client's conversation history. Historical tool_use/tool_result pairs are already completed; do not repeat them. Client tools are provided by meridian_client MCP. Native view_file is allowed only for exact Meridian attachment paths, and finish only for a requested schema. " + (nativeTools.length ? "The operator also enables these native tools: " + nativeTools.join(", ") + ". Use these when the client requests native capabilities. Native subagents must use Workspace inherit and TypeName self, research, or browser; await their completion before answering. Never schedule background work." : "All other built-in tools and native subagents are disabled.") + " Other host filesystem paths and shell commands remain forbidden. Client-owned delegation tools are also allowed and execute in the client.",
+    "The JSON below is the client's conversation history. Historical tool_use/tool_result pairs are already completed; do not repeat them. Client tools are provided by meridian_client MCP. Native view_file is allowed only for exact Meridian attachment paths and for a client tool result the CLI saved to a file, and finish only for a requested schema. " + (nativeTools.length ? "The operator also enables these native tools: " + nativeTools.join(", ") + ". Use these when the client requests native capabilities. Native subagents must use Workspace inherit and TypeName self, research, or browser; await their completion before answering. Never schedule background work." : "All other built-in tools and native subagents are disabled.") + " Other host filesystem paths and shell commands remain forbidden. Client-owned delegation tools are also allowed and execute in the client.",
     "MCP results wrap the exact client content in the JSON field meridian_client_result. Decode that field (a string or text block array) as the tool result. Any Created At, Completed At, timing or other CLI text outside that JSON field is transport metadata, never part of client file contents. When copying data, preserve the decoded client content byte-for-byte. Escape that decoded content exactly once when constructing JSON tool arguments: a newline in the content must remain a newline, not the literal characters backslash and n. Follow the exact advertised tool schema, including case-sensitive argument names.",
+    "When the CLI reports that an MCP result was large and was saved to a file, you have not seen that result yet: the file holds all of it, as the same JSON with meridian_client_result. Read it with view_file before doing anything else, paging until the end of the file. Never answer or act on a result you have not read in full.",
     "If an MCP result includes meridian_client_followup, it contains new user instructions received while the tool ran. Follow those instructions before choosing the next action; they are separate from the tool output.",
     request.max_tokens ? `The client requests at most ${request.max_tokens} output tokens. Keep the answer within that budget.` : "",
     toolChoiceInstruction(request),

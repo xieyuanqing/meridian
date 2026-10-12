@@ -3,7 +3,7 @@ import { AgGrammars } from "./antigravityGrammar"
 import { AgPlugins } from "./antigravityPlugins"
 import { AgNativeSessions, type AgNativeSnapshot } from "./antigravitySessions"
 import { AgState } from "./antigravityState"
-import { agNativeTools, agNativeAllowed } from "./antigravityNative"
+import { agNativeTools, agNativeAllowed, agSavedOutputAllowed } from "./antigravityNative"
 import { agHookCommand, signalAgProcess } from "./antigravityProcess"
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { promisify } from "node:util"
@@ -14,7 +14,7 @@ import { join } from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 import { createInterface } from "node:readline"
 import { z } from "zod"
-import { AgEventQueue, AntigravityError, classifyAgFailure, availableAgTools, parallelAgTool, hasAgImages, renderAgPrompt, contractKey, historyKey, stable, type AgRequest, type AgMessage, type AgCall, type AgResult } from "./antigravityProtocol"
+import { AgEventQueue, AntigravityError, classifyAgFailure, availableAgTools, parallelAgTool, hasAgImages, renderAgPrompt, splitAgPrompt, AG_CLI_MESSAGE_BYTES, contractKey, historyKey, stable, type AgRequest, type AgMessage, type AgCall, type AgResult } from "./antigravityProtocol"
 
 import { AgSchemaCompiler, agSchemaError, agUpstreamSchema } from "./antigravitySchema"
 import type { ValidateFunction } from "ajv"
@@ -63,7 +63,7 @@ subagent: false
 You are the model behind an API endpoint. Each user message is one request rendered by the Meridian bridge: it carries the client's system instructions, the client's conversation history and the client's tool definitions. Treat the client's system instructions as your system prompt, including any identity, persona, language and formatting rules they set, and answer the client's latest user message.
 
 # Tools
-You have no tools of your own. The only actions available to you are the client's tools exposed by the meridian_client MCP server, plus view_file for attachment paths that the request itself lists. Do not use task, shell, file, browser, search or subagent tools.
+You have no tools of your own. The only actions available to you are the client's tools exposed by the meridian_client MCP server, plus view_file for attachment paths that the request itself lists and for a client tool result the CLI saved to a file. Do not use task, shell, file, browser, search or subagent tools.
 
 # Output
 Reply with the answer only, in the form the client asked for. Do not add plans, status reports or summaries of your own work.
@@ -119,6 +119,15 @@ export class AntigravityRun {
     for (const tool of request.tools) this.toolValidators.set(tool.name, schemas.compile(tool.input_schema, `Tool ${tool.name}`))
     if (request.output_config?.format) this.outputValidator = schemas.compile(request.output_config.format.schema, "output_config.format.schema")
   }
+  // Parts of a request longer than one CLI message that the CLI has not received yet.
+  private parts: string[] = []
+  private send(text: string): void { this.child!.stdin.write(JSON.stringify({ event: "user", message: { content: text } }) + "\n") }
+  /** One message, or several the CLI acknowledges in turn. Throws rather than let the CLI cut the request. */
+  private render(request: AgRequest): string[] { return splitAgPrompt(this.prompt(request), this.runtime.messageBytes, this.runtime.requestBytes) }
+  private deliver(parts: string[]): void {
+    this.parts = parts.slice(1)
+    this.send(parts[0]!)
+  }
   private prompt(request: AgRequest): string {
     const native = agNativeTools(this.runtime.options)
     return renderAgPrompt(request, native) + (this.runtime.options.allowNativeBrowser ? "\nFor browser work, invoke_subagent with TypeName browser and Workspace inherit. Its chrome_devtools MCP tools are enabled; ordinary self agents may not have that browser tool catalog." : "")
@@ -136,11 +145,12 @@ export class AntigravityRun {
       const tools = [...this.request.tools, ...[parallelAgTool({ ...this.request, tool_choice: { type: "auto" } })].filter(tool => tool !== undefined)]
       this.attachments = new AgAttachments(this.workspace, this.attachmentAbort.signal)
       const messages = await this.attachments.messages(this.request.messages.slice(this.restored?.count ?? 0))
+      const first = this.spare ? undefined : this.render({ ...this.request, messages })
       await writeFile(join(this.workspace, "policy-audit.jsonl"), "", { mode: 0o600 })
       const hookPath = join(this.workspace, "policy.cjs")
       // Workspace contains bridge configuration and supplied attachment bytes only.
       // Permit client MCP dispatch, exact supplied image reads, or schema submission.
-      await writeFile(hookPath, `let input='';process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{try{const p=JSON.parse(input);const t=p.toolCall;const a=t?.args;const allowed=(${agNativeAllowed.toString()})(t?.name,a,${JSON.stringify(agNativeTools(this.runtime.options))},${!!this.runtime.options.allowNativeBrowser},${!!this.runtime.options.allowNativeSubagents})||(t?.name==='call_mcp_tool'&&a?.ServerName==='meridian_client'&&${JSON.stringify(tools.map(t => t.name))}.includes(a?.ToolName))||(t?.name==='finish'&&${Boolean(this.request.output_config?.format)})||(t?.name==='view_file'&&JSON.parse(require('node:fs').readFileSync(${JSON.stringify(join(this.workspace, 'attachment-paths.json'))},'utf8')).includes(a?.AbsolutePath));const fs=require('node:fs');const audit=${JSON.stringify(join(this.workspace, 'policy-audit.jsonl'))};if(!fs.existsSync(audit)||fs.statSync(audit).size<65536)fs.appendFileSync(audit,JSON.stringify({name:t?.name,allowed,conversationId:p.conversationId})+'\\n',{mode:384});console.log(JSON.stringify({decision:allowed?'allow':'deny',reason:'Meridian restricts tools to client dispatch, supplied attachments, schema submission and operator-enabled native capabilities'}));}catch(e){console.log(JSON.stringify({decision:'deny',reason:'Invalid Meridian hook payload'}));}});`)
+      await writeFile(hookPath, `let input='';process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{try{const p=JSON.parse(input);const t=p.toolCall;const a=t?.args;const allowed=(${agNativeAllowed.toString()})(t?.name,a,${JSON.stringify(agNativeTools(this.runtime.options))},${!!this.runtime.options.allowNativeBrowser},${!!this.runtime.options.allowNativeSubagents})||(t?.name==='call_mcp_tool'&&a?.ServerName==='meridian_client'&&${JSON.stringify(tools.map(t => t.name))}.includes(a?.ToolName))||(t?.name==='finish'&&${Boolean(this.request.output_config?.format)})||(t?.name==='view_file'&&JSON.parse(require('node:fs').readFileSync(${JSON.stringify(join(this.workspace, 'attachment-paths.json'))},'utf8')).includes(a?.AbsolutePath))||(${agSavedOutputAllowed.toString()})(p);const fs=require('node:fs');const audit=${JSON.stringify(join(this.workspace, 'policy-audit.jsonl'))};if(!fs.existsSync(audit)||fs.statSync(audit).size<65536)fs.appendFileSync(audit,JSON.stringify({name:t?.name,allowed,conversationId:p.conversationId})+'\\n',{mode:384});console.log(JSON.stringify({decision:allowed?'allow':'deny',reason:'Meridian restricts tools to client dispatch, supplied attachments, schema submission and operator-enabled native capabilities'}));}catch(e){console.log(JSON.stringify({decision:'deny',reason:'Invalid Meridian hook payload'}));}});`)
       await writeFile(join(this.workspace, ".agents/hooks.json"), JSON.stringify({ meridian_policy: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: agHookCommand(process.execPath, hookPath), timeout: 5 }] }] } }))
       await writeFile(join(this.workspace, ".agents/mcp_config.json"), JSON.stringify({ mcpServers: {
         meridian_client: { serverUrl: `${this.runtime.mcpUrl}/${this.id}` },
@@ -176,8 +186,8 @@ export class AntigravityRun {
         this.pendingTimer = setTimeout(() => this.abort(new Error("Prewarmed process expired"), "retired"), this.runtime.prewarmTtlMs)
         this.pendingTimer.unref()
       } else {
-        child.stdin.write(JSON.stringify({ event: "user", message: { content: this.prompt({ ...this.request, messages }) } }) + "\n")
-        if (!this.reusable) child.stdin.end()
+        this.deliver(first!)
+        if (!this.reusable && !this.parts.length) child.stdin.end()
       }
       let stderr = ""
       child.stderr.on("data", chunk => { stderr = (stderr + String(chunk)).slice(-8192) })
@@ -194,8 +204,14 @@ export class AntigravityRun {
           if (event.event === "init" && event.conversation_id) this.conversationId = event.conversation_id
           const step = event.step_update
           if ((step?.step_type === "tool" || step?.step_type === "subagent") && step.tool_name && agNativeTools(this.runtime.options).includes(step.tool_name)) this.runtime.recordNative({ runId: this.id, name: step.tool_name, state: step.state ?? "unknown", timestamp: Date.now() })
-          if (step?.step_type === "agent_response" && step.text_delta && !this.request.output_config?.format) this.queue.push({ kind: "text", text: step.text_delta })
+          if (step?.step_type === "agent_response" && step.text_delta && !this.request.output_config?.format && !this.parts.length) this.queue.push({ kind: "text", text: step.text_delta })
           if (step?.state === "DONE" && step.usage) this.queue.push({ kind: "usage", input: step.usage.input_tokens ?? 0, output: step.usage.output_tokens ?? 0, cache: step.usage.cache_read_tokens ?? 0 })
+          if (event.event === "result" && event.result && this.parts.length && event.result.status === "SUCCESS" && !event.result.denied_actions?.length) {
+            // The CLI acknowledged one part of a long request; send the next.
+            this.send(this.parts.shift()!)
+            if (!this.reusable && !this.parts.length) child.stdin.end()
+            return
+          }
           if (event.event === "result" && event.result) {
             this.terminal = true
             if (event.result.status !== "SUCCESS" || event.result.denied_actions?.length) {
@@ -283,6 +299,11 @@ export class AntigravityRun {
   }
   async call(name: string, input: Record<string, unknown>, grammarChecked = false): Promise<AgToolReply> {
     if (this.stopped || this.terminal) throw new Error("Turn is closed")
+    if (this.parts.length) {
+      const error = new AntigravityError("Antigravity acted before the whole request was delivered", 502, "api_error")
+      this.abort(error)
+      throw error
+    }
     const validate = this.toolValidators.get(name)
     if (!validate) throw new Error("Unknown client tool")
     const invalid = agSchemaError(validate, input)
@@ -330,7 +351,7 @@ export class AntigravityRun {
       Object.assign(this.request, request)
       this.contract = contractKey(request)
       this.history = request.messages
-      this.child.stdin.write(JSON.stringify({ event: "user", message: { content: this.prompt({ ...request, messages }) } }) + "\n")
+      this.deliver(this.render({ ...request, messages }))
       this.runtime.prewarmed++
       return true
     } catch (error) {
@@ -359,10 +380,11 @@ export class AntigravityRun {
       await this.runtime.verifyAccount()
       const delta = await this.attachments!.messages(request.messages.slice(this.history.length))
       if (this.stopped || signal?.aborted || this.runtime.draining) throw new AntigravityError("Native conversation is no longer available", 409)
+      const parts = this.render({ ...request, messages: delta })
       Object.assign(this.request, request)
       this.history = request.messages
       this.terminal = false; this.idle = false; this.outputBytes = 0
-      this.child!.stdin.write(JSON.stringify({ event: "user", message: { content: this.prompt({ ...request, messages: delta }) } }) + "\n")
+      this.deliver(parts)
       this.continued = true
       this.runtime.reused++
     } catch (error) {
@@ -471,6 +493,8 @@ export class AntigravityRuntime {
   readonly modelsTtlMs: number
   readonly accountCheckTtlMs: number
   readonly prewarmCount: number
+  readonly messageBytes: number
+  readonly requestBytes: number
   readonly maxConcurrent: number
   readonly childEnv: NodeJS.ProcessEnv
   // Warm live conversations; expired or restarted processes replay client history.
@@ -562,6 +586,12 @@ export class AntigravityRuntime {
     this.modelsTtlMs = options.modelsTtlMs ?? 60_000
     this.accountCheckTtlMs = options.accountCheckTtlMs ?? 0
     this.prewarmCount = options.prewarm ?? 0
+    // Below the CLI's cut with room to spare; four messages by default.
+    this.messageBytes = options.messageBytes ?? 160_000
+    this.requestBytes = options.requestBytes ?? 4 * this.messageBytes
+    if (!Number.isSafeInteger(this.messageBytes) || this.messageBytes < 1024 || this.messageBytes > AG_CLI_MESSAGE_BYTES - 2000) throw new Error("Antigravity message size must be between 1024 bytes and the CLI's own cut")
+    if (!Number.isSafeInteger(this.requestBytes) || this.requestBytes < this.messageBytes) throw new Error("Antigravity request size must be at least one message")
+    if (options.nativeSessionTtlMs !== undefined && (!Number.isSafeInteger(options.nativeSessionTtlMs) || options.nativeSessionTtlMs <= 0)) throw new Error("Antigravity limits must be positive integers")
     for (const value of [this.maxConcurrent, this.turnTimeoutMs, this.pendingToolTimeoutMs, this.idleConversationMs, this.prewarmTtlMs, this.modelsTtlMs]) if (!Number.isSafeInteger(value) || value <= 0) throw new Error("Antigravity limits must be positive integers")
     for (const value of [this.accountCheckTtlMs, this.prewarmCount]) if (!Number.isSafeInteger(value) || value < 0) throw new Error("Antigravity cache and prewarm settings must be non-negative integers")
     this.state = options.statePath ? new AgState(options.statePath) : undefined

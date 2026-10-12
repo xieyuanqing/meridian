@@ -64,6 +64,6 @@ export class AgNativeSessions {
     return value
   }
   save(request: AgRequest, history: AgMessage[], value: AgNativeSnapshot) {
-    this.state.put('native-sessions', this.key(request, history), '', JSON.stringify(value), Date.now() + 30 * 60_000, 128, 1024 * 1024)
+    this.state.put('native-sessions', this.key(request, history), '', JSON.stringify(value), Date.now() + (this.options.nativeSessionTtlMs ?? 30 * 60_000), 128, 1024 * 1024)
   }
 }

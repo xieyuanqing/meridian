@@ -234,6 +234,31 @@ allowToolBridge, maxConcurrent, turnTimeoutMs, pendingToolTimeoutMs }` on
 These settings are off by default and change nothing unless set. They trade some
 of the default caution for latency and quota, so read what each one gives up.
 
+**Long requests.** The CLI keeps the first 192,000 bytes of a user message and
+drops the rest without an error, and a replayed history puts the newest
+messages last. Meridian therefore never sends one message above
+`MERIDIAN_AGY_MESSAGE_BYTES` (default 160000). A longer request is split into
+parts; the CLI acknowledges each part before the next is sent, and only the
+answer to the final part reaches the client. Each extra part is one more model
+call. A request above `MERIDIAN_AGY_REQUEST_BYTES` (default four messages) is
+refused with `prompt is too long`, which most clients answer by compacting
+their history. A tool call made before the last part arrived fails the turn.
+
+**Large tool results.** The CLI saves an MCP result above roughly 4 KB to a step
+file inside its own conversation directory and shows the model only the path.
+The deny hook allows `view_file` on exactly those files of the current
+conversation, and the prompt tells the model to read one in full before using
+it. Expect one or more extra model steps for each large result.
+
+**Resumable conversations.** With `MERIDIAN_AGY_STATE_PATH` set, a completed
+conversation whose process has ended can be resumed with the CLI's own
+`--conversation`, so the next turn sends only the new messages.
+`MERIDIAN_AGY_SESSION_TTL_MS` sets how long it stays resumable (default 30
+minutes). Keep it below whatever removes old CLI conversation records. A
+conversation matches when the client sends back the same history; whitespace
+around assistant text is ignored, because the CLI ends its text with a newline
+that clients commonly trim.
+
 **Accepted versions.** `MERIDIAN_AGY_ACCEPT_VERSIONS=1.3.3` admits that CLI
 version beside the built-in gate. Meridian has not validated it; you have. The
 CLI updates itself in place, so point `MERIDIAN_AGY_PATH` at a copy the service

@@ -35,13 +35,22 @@ async function main(inputPrompt) {
       if (JSON.parse(result.stdout).decision !== decision) throw new Error('Image policy mismatch')
     }
   }
+  if (prompt.includes('SPILL_PROBE')) {
+    const id = '11111111-2222-3333-4444-555555555555', other = '99999999-2222-3333-4444-555555555555'
+    const directory = '/home/agy/.gemini/antigravity-cli/brain/' + id, steps = directory + '/.system_generated/steps/'
+    for (const [path, decision] of [[steps + '12/output.txt', 'allow'], [steps + '12/../../logs/transcript.jsonl', 'deny'], [steps + '12/output.txt/../../../../../' + other + '/.system_generated/steps/1/output.txt', 'deny'], [directory.replace(id, other) + '/.system_generated/steps/1/output.txt', 'deny'], [directory + '/.system_generated/logs/transcript.jsonl', 'deny']]) {
+      const result = spawnSync(process.execPath, ['policy.cjs'], { input: JSON.stringify({ conversationId: id, artifactDirectoryPath: directory, toolCall: { name: 'view_file', args: { AbsolutePath: path } } }), encoding: 'utf8' })
+      if (JSON.parse(result.stdout).decision !== decision) throw new Error('Saved output policy mismatch: ' + path)
+    }
+  }
+  if (prompt.includes('RESTORED_PROBE') && (!args.includes('--conversation') || prompt.includes('NATIVE_FIRST'))) throw new Error('Conversation was replayed instead of resumed')
   if (prompt.includes('EFFORT_PROBE') && args[args.indexOf('--effort') + 1] !== 'high') throw new Error('Native effort flag missing')
   if (prompt.includes('LEAN_PROBE')) {
     const agent = args.includes('--agent') && args[args.indexOf('--agent') + 1]
     if (agent !== 'meridian-client' || !/^tools:\n {2}- view_file$/m.test(readFileSync('.agents/agents/meridian-client.md', 'utf8'))) throw new Error('Lean agent missing')
   }
   if (prompt.includes('DEFAULT_AGENT_PROBE') && args.includes('--agent')) throw new Error('Unexpected agent override')
-  emit({ event: 'init' })
+  emit({ event: 'init', ...(process.env.AGY_FIXTURE_CONVERSATION ? { conversation_id: args.includes('--conversation') ? args[args.indexOf('--conversation') + 1] : process.env.AGY_FIXTURE_CONVERSATION } : {}) })
   if (prompt.includes('RATE_LIMIT')) return emit({event:'result',result:{status:'ERROR',error:'Quota exhausted; retry in 45 seconds'}})
   if (prompt.includes('HANG')) { setInterval(() => {}, 1000); return }
   if (prompt.includes('MALFORMED')) { console.log('not JSON'); return }
@@ -119,6 +128,7 @@ async function main(inputPrompt) {
       answer = JSON.stringify(followup)
     } else answer = results.map(result => (result.isError ? 'FAILED:' : '') + ((value) => typeof value === 'string' ? value : value.map(b => b.text).join(''))(JSON.parse(result.content[0].text).meridian_client_result)).join('|')
   }
+  if (prompt.includes('ECHO_TAIL')) answer = (typeof lastContent === 'string' ? lastContent : lastContent.map(b => b.text ?? '').join('')).slice(-22)
   if (prompt.includes('NATIVE_SECOND')) {
     if (nativePrompts.length !== 2 || prompt.includes('NATIVE_FIRST')) throw new Error('Native continuation replayed history or spawned another process')
     answer = 'NATIVE_REUSED'
@@ -134,6 +144,20 @@ async function main(inputPrompt) {
 async function run() {
   if (!args.includes('--input-format')) return main()
   const lines = require('node:readline').createInterface({ input: process.stdin })
-  for await (const line of lines) await main(JSON.parse(line).message.content)
+  const pieces = []
+  for await (const line of lines) {
+    const content = JSON.parse(line).message.content
+    // A long request arrives as acknowledged parts; only the joined whole is a prompt.
+    const part = /^Meridian request part (\d+) of (\d+)[^\n]*\n\n/.exec(content)
+    if (!part) { await main(content); continue }
+    pieces.push(content.slice(part[0].length))
+    if (part[1] === part[2]) { await main(pieces.splice(0).join('')); continue }
+    if (content.includes('PRELOAD_TOOL')) {
+      const url = JSON.parse(readFileSync('.agents/mcp_config.json', 'utf8')).mcpServers.meridian_client.serverUrl
+      await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 900, method: 'tools/call', params: { name: 'lookup', arguments: { key: 'early' } } }) })
+    }
+    emit({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'OK' } })
+    emit({ event: 'result', result: { status: 'SUCCESS' } })
+  }
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

@@ -7,6 +7,21 @@ export function agNativeTools(options: { allowNativeBrowser?: boolean; allowNati
   ])]
 }
 
+/**
+ * The CLI saves an MCP result above roughly 4 KB to its own step file and shows
+ * the model only that path. Reading it back is how the model sees the result,
+ * so allow exactly this conversation's saved step outputs and nothing beside them.
+ */
+export function agSavedOutputAllowed(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false
+  const { conversationId, artifactDirectoryPath, toolCall } = payload as { conversationId?: unknown; artifactDirectoryPath?: unknown; toolCall?: { name?: unknown; args?: { AbsolutePath?: unknown } } }
+  const path = toolCall?.args?.AbsolutePath
+  if (toolCall?.name !== 'view_file' || typeof path !== 'string' || typeof artifactDirectoryPath !== 'string' || typeof conversationId !== 'string') return false
+  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(conversationId) || !artifactDirectoryPath.endsWith('/brain/' + conversationId)) return false
+  const steps = artifactDirectoryPath + '/.system_generated/steps/'
+  return path.startsWith(steps) && /^\d+\/output\.txt$/.test(path.slice(steps.length))
+}
+
 /** Keep subagents in the guarded workspace and gate browser delegation separately. */
 export function agNativeAllowed(name: unknown, args: unknown, allowed: string[], browser: boolean, subagents: boolean): boolean {
   if (name !== 'invoke_subagent') {
