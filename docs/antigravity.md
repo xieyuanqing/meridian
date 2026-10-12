@@ -209,6 +209,13 @@ directories. Meridian does not edit or garbage-collect those private records.
 | `MERIDIAN_AGY_MAX_CONCURRENT` | `4` | Maximum live processes; idle pending tools can yield capacity |
 | `MERIDIAN_AGY_TURN_TIMEOUT_MS` | `300000` | Per-turn deadline, including preprocessing and tool waits |
 | `MERIDIAN_AGY_TOOL_TIMEOUT_MS` | `60000` | Pending result deadline and completed-conversation idle retention |
+| `MERIDIAN_AGY_IDLE_TIMEOUT_MS` | tool timeout | Idle retention of a completed live conversation, separate from the tool deadline |
+| `MERIDIAN_AGY_ACCEPT_VERSIONS` | unset | Comma-separated extra `agy` versions you have validated yourself |
+| `MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS` | `0` | Reuse a successful version/configuration check for this long; `0` checks every admission |
+| `MERIDIAN_AGY_MODELS_TTL_MS` | `60000` | Account model list cache lifetime |
+| `MERIDIAN_AGY_LEAN_AGENT` | off | Run under a minimal Meridian agent instead of the CLI's default agent |
+| `MERIDIAN_AGY_PREWARM` | `0` | Idle pre-started CLI processes to keep for recently used request shapes |
+| `MERIDIAN_AGY_PREWARM_TTL_MS` | `600000` | Lifetime of an unused pre-started process |
 
 Capacity exhaustion returns 429 with `Retry-After`. No unbounded request queue
 is created. Bodies are capped at 8 MiB; upstream stdout is capped at 16 MiB.
@@ -220,6 +227,48 @@ allowToolBridge, maxConcurrent, turnTimeoutMs, pendingToolTimeoutMs }` on
 `startProxyServer`. Call `ProxyInstance.close()` to release resources. Direct
 `createProxyServer().app.fetch` embedders must call the optional
 `closeBackend()` when finished.
+
+## Operator tuning
+
+These settings are off by default and change nothing unless set. They trade some
+of the default caution for latency and quota, so read what each one gives up.
+
+**Accepted versions.** `MERIDIAN_AGY_ACCEPT_VERSIONS=1.3.3` admits that CLI
+version beside the built-in gate. Meridian has not validated it; you have. The
+CLI updates itself in place, so point `MERIDIAN_AGY_PATH` at a copy the service
+account cannot replace; otherwise an update takes the service down at the gate
+until you validate the new version. On agy 1.3.3, `AGY_CLI_DISABLE_AUTO_UPDATE=true`
+in the service environment also stops the background updater from starting (the
+value `1` does not).
+
+**Account check lifetime.** Each admission normally runs `agy -p /config`, a
+full CLI start. `MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS` lets a successful check
+stand for that long. Within the window, a change to the CLI's provider or
+paid-overage settings is not noticed. A failed check is never cached.
+`MERIDIAN_AGY_MODELS_TTL_MS` does the same for `agy models`; a request for a
+model missing from an old list still refreshes it once.
+
+**Lean agent.** By default the CLI's own agent prompt and native tool catalog
+accompany every request. `MERIDIAN_AGY_LEAN_AGENT=1` starts ordinary requests
+under a Meridian-written agent (`.agents/agents/meridian-client.md` in the
+disposable workspace) that lists only `view_file` and tells the model to treat
+the client's instructions as its system prompt. The deny hook is unchanged and
+still decides every tool call. Requests with a JSON schema, and services with
+native browser or subagents enabled, keep the default agent, because the lean
+agent has no `finish` tool or native catalog.
+
+**Prewarmed processes.** With `MERIDIAN_AGY_PREWARM=1`, after a request needed a
+fresh CLI process, Meridian starts one more with an empty conversation for the
+same model, effort and tool catalog. The CLI finishes sign-in and conversation
+setup without a prompt, so the next new conversation of that shape skips that
+startup. A spare holds no client instructions or history; those arrive with the
+request that adopts it. Spares count toward `MERIDIAN_AGY_MAX_CONCURRENT`,
+expire after `MERIDIAN_AGY_PREWARM_TTL_MS`, are the first thing reclaimed when
+capacity is needed, and never displace an active turn, a pending tool call or a
+conversation a client has continued. At capacity, a spare may retire an idle
+conversation that no client ever came back to. Schema output, stop sequences,
+custom grammars and native browser/subagents are not prewarmed. Each spare is
+one more official CLI process and one more empty CLI conversation record.
 
 ## Supported surface and limits
 

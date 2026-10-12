@@ -45,12 +45,36 @@ function reply(res: ServerResponse, status: number, value: unknown) {
   res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(value))
 }
 
+// Optional replacement for the CLI's default agent. The body becomes the CLI's
+// system prompt, so the client's own instructions (rendered into each user
+// message) are not competing with a coding-assistant persona and ~60 native
+// tool definitions. view_file stays listed for Meridian-created attachments.
+const AG_LEAN_AGENT_NAME = "meridian-client"
+const AG_LEAN_AGENT = `---
+name: ${AG_LEAN_AGENT_NAME}
+description: Serves an API client through Meridian using only client-owned tools.
+tools:
+  - view_file
+mainAgent: true
+subagent: false
+---
+
+# Role
+You are the model behind an API endpoint. Each user message is one request rendered by the Meridian bridge: it carries the client's system instructions, the client's conversation history and the client's tool definitions. Treat the client's system instructions as your system prompt, including any identity, persona, language and formatting rules they set, and answer the client's latest user message.
+
+# Tools
+You have no tools of your own. The only actions available to you are the client's tools exposed by the meridian_client MCP server, plus view_file for attachment paths that the request itself lists. Do not use task, shell, file, browser, search or subagent tools.
+
+# Output
+Reply with the answer only, in the form the client asked for. Do not add plans, status reports or summaries of your own work.
+`
+
 
 export class AntigravityRun {
   readonly id = randomUUID()
   readonly queue = new AgEventQueue()
   readonly rpcSessions = new Set<string>()
-  readonly contract: string
+  contract: string
   history: AgMessage[]
   busy = false
   delivered: AgCall[] = []
@@ -80,8 +104,13 @@ export class AntigravityRun {
   private readonly rpcCalls = new Map<string, { identity: string; result: Promise<AgToolReply> }>()
   private settledResolve!: () => void
   readonly settled = new Promise<void>(resolve => { this.settledResolve = resolve })
-  constructor(readonly runtime: AntigravityRuntime, readonly request: AgRequest, private readonly restored?: AgNativeSnapshot) {
+  /** Resolves once a pre-started process has been spawned; rejects if it could not start. */
+  ready?: Promise<void>
+  // A spare is a pre-started process with an empty conversation, waiting for the
+  // first request whose spawn-time shape (model, effort, tools) it was built for.
+  constructor(readonly runtime: AntigravityRuntime, readonly request: AgRequest, private readonly restored?: AgNativeSnapshot, private spare = false) {
     this.grammars = new AgGrammars(request, this.attachmentAbort.signal)
+    this.idle = spare
     this.continuation = restored ? "restored" : "new"
     this.reusable = runtime.options.reuseConversations !== false && !request.output_config?.format && !request.stop_sequences?.length
     this.history = request.messages
@@ -95,8 +124,10 @@ export class AntigravityRun {
     return renderAgPrompt(request, native) + (this.runtime.options.allowNativeBrowser ? "\nFor browser work, invoke_subagent with TypeName browser and Workspace inherit. Its chrome_devtools MCP tools are enabled; ordinary self agents may not have that browser tool catalog." : "")
   }
   async start(): Promise<void> {
-      this.timer = setTimeout(() => this.abort(new AntigravityError("Antigravity turn timed out", 504, "api_error")), this.runtime.turnTimeoutMs)
-      this.timer.unref()
+      if (!this.spare) {
+        this.timer = setTimeout(() => this.abort(new AntigravityError("Antigravity turn timed out", 504, "api_error")), this.runtime.turnTimeoutMs)
+        this.timer.unref()
+      }
     try {
       await this.grammars.prepare()
       this.workspace = this.restored?.workspace ?? await realpath(await mkdtemp(this.runtime.nativeSessions ? join(this.runtime.nativeSessions.directory, "conversation-") : join(tmpdir(), "meridian-agy-")))
@@ -126,13 +157,28 @@ export class AntigravityRun {
         args.push("--json-schema", schemaPath)
       }
       if (this.request.output_config?.effort) args.push("--effort", this.request.output_config.effort)
+      if (this.runtime.leanAgentFor(this.request)) {
+        // Replaces the CLI's default persona and native tool catalog. The deny
+        // hook above still governs every tool call; this only narrows the catalog.
+        await mkdir(join(this.workspace, ".agents/agents"), { recursive: true })
+        await writeFile(join(this.workspace, ".agents/agents", AG_LEAN_AGENT_NAME + ".md"), AG_LEAN_AGENT)
+        args.push("--agent", AG_LEAN_AGENT_NAME)
+      }
       if (agNativeTools(this.runtime.options).length || (this.request.tools.length && this.runtime.options.allowToolBridge) || this.attachments.present) args.push("--dangerously-skip-permissions")
       if (this.stopped) { await this.cleanup(); return }
       const child = this.child = spawn(this.runtime.executable, args, { cwd: this.workspace, env: this.runtime.childEnv, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", windowsHide: true })
       if (child.pid) this.runtime.nativeSessions?.register(this.workspace, child.pid)
-      child.stdin.on("error", error => this.abort(new AntigravityError(`Antigravity input failed: ${error.message}`, 502, "api_error")))
-      child.stdin.write(JSON.stringify({ event: "user", message: { content: this.prompt({ ...this.request, messages }) } }) + "\n")
-      if (!this.reusable) child.stdin.end()
+      child.stdin.on("error", error => this.abort(new AntigravityError(`Antigravity input failed: ${error.message}`, 502, "api_error"), this.spare ? "retired" : "failed"))
+      if (this.spare) {
+        // The CLI completes sign-in and conversation setup without a prompt, so
+        // the first adopted request skips that startup. Unused spares expire.
+        this.idle = true
+        this.pendingTimer = setTimeout(() => this.abort(new Error("Prewarmed process expired"), "retired"), this.runtime.prewarmTtlMs)
+        this.pendingTimer.unref()
+      } else {
+        child.stdin.write(JSON.stringify({ event: "user", message: { content: this.prompt({ ...this.request, messages }) } }) + "\n")
+        if (!this.reusable) child.stdin.end()
+      }
       let stderr = ""
       child.stderr.on("data", chunk => { stderr = (stderr + String(chunk)).slice(-8192) })
       child.stdout.on("data", chunk => {
@@ -166,8 +212,9 @@ export class AntigravityRun {
               this.runtime.completed++
               clearTimeout(this.timer)
               this.idle = true
+              this.idleSince = Date.now()
               this.queue.push({ kind: "end" })
-              this.pendingTimer = setTimeout(() => this.abort(new Error("Idle conversation expired"), "retired"), this.runtime.pendingToolTimeoutMs)
+              this.pendingTimer = setTimeout(() => this.abort(new Error("Idle conversation expired"), "retired"), this.runtime.idleConversationMs)
               this.pendingTimer.unref()
             }
           }
@@ -176,6 +223,8 @@ export class AntigravityRun {
       child.once("error", error => this.abort(new AntigravityError(`Cannot start agy: ${error.message}`, 503, "api_error")))
       child.once("close", (code, signal) => {
         this.exited = true
+        // An unused spare that exits is simply gone; the next request starts normally.
+        if (this.spare && !this.stopped) this.abort(new Error("Prewarmed process exited"), "retired")
         if (this.terminal && !this.stopped && !this.reusable) {
           if (code !== 0 || signal) this.abort(classifyAgFailure("Antigravity exited unsuccessfully after its result"))
           else {
@@ -252,8 +301,45 @@ export class AntigravityRun {
   }
   get active(): boolean { return !this.idle && !this.stopped }
   get reclaimable(): boolean { return !this.busy && (this.delivered.length > 0 || this.idle) && !this.stopped }
+  get prewarmed(): boolean { return this.spare }
+  idleSince = 0
+  /** Set once a client has come back to this live conversation. */
+  continued = false
+  /** A completed conversation nobody is waiting on: no active turn and no tool call awaiting its result. */
+  get retirable(): boolean { return !this.spare && this.idle && !this.busy && !this.stopped && this.delivered.length === 0 }
+  /** Bind a pre-started process to its first request. Mirrors resume(), but the whole client history is new to the CLI. */
+  async adopt(request: AgRequest, signal?: AbortSignal): Promise<boolean> {
+    try { await this.ready } catch { return false }
+    if (!this.spare || this.stopped || this.exited || !this.child) return false
+    this.spare = false
+    this.continuation = "prewarmed"
+    this.busy = true
+    this.idle = false
+    clearTimeout(this.pendingTimer)
+    this.timer = setTimeout(() => this.abort(new AntigravityError("Antigravity turn timed out", 504, "api_error")), this.runtime.turnTimeoutMs)
+    this.timer.unref()
+    const cancel = () => this.abort(new AntigravityError("Request cancelled", 499, "api_error"))
+    signal?.addEventListener("abort", cancel, { once: true })
+    if (signal?.aborted) cancel()
+    try {
+      const messages = await this.attachments!.messages(request.messages)
+      if (this.stopped || signal?.aborted || this.runtime.draining) throw new AntigravityError("Prewarmed process is no longer available", 409)
+      // The template carried no client context; drop anything the request omits.
+      const target = this.request as Record<string, unknown>
+      for (const key of Object.keys(target)) if (!(key in request)) delete target[key]
+      Object.assign(this.request, request)
+      this.contract = contractKey(request)
+      this.history = request.messages
+      this.child.stdin.write(JSON.stringify({ event: "user", message: { content: this.prompt({ ...request, messages }) } }) + "\n")
+      this.runtime.prewarmed++
+      return true
+    } catch (error) {
+      this.abort(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    } finally { signal?.removeEventListener("abort", cancel) }
+  }
   matches(request: AgRequest): boolean {
-    return this.reusable && this.toolCalls < 128 && this.idle && !this.stopped && !this.busy && request.messages.length > this.history.length &&
+    return !this.spare && this.reusable && this.toolCalls < 128 && this.idle && !this.stopped && !this.busy && request.messages.length > this.history.length &&
       this.contract === contractKey(request) && historyKey(this.history) === historyKey(request.messages.slice(0, this.history.length)) &&
       request.messages.slice(this.history.length).every(message => message.role === "user")
   }
@@ -277,6 +363,7 @@ export class AntigravityRun {
       this.history = request.messages
       this.terminal = false; this.idle = false; this.outputBytes = 0
       this.child!.stdin.write(JSON.stringify({ event: "user", message: { content: this.prompt({ ...request, messages: delta }) } }) + "\n")
+      this.continued = true
       this.runtime.reused++
     } catch (error) {
       this.abort(error instanceof Error ? error : new Error(String(error)))
@@ -379,6 +466,11 @@ export class AntigravityRuntime {
   readonly executable: string
   readonly turnTimeoutMs: number
   readonly pendingToolTimeoutMs: number
+  readonly idleConversationMs: number
+  readonly prewarmTtlMs: number
+  readonly modelsTtlMs: number
+  readonly accountCheckTtlMs: number
+  readonly prewarmCount: number
   readonly maxConcurrent: number
   readonly childEnv: NodeJS.ProcessEnv
   // Warm live conversations; expired or restarted processes replay client history.
@@ -465,7 +557,13 @@ export class AntigravityRuntime {
     this.maxConcurrent = options.maxConcurrent ?? 4
     this.turnTimeoutMs = options.turnTimeoutMs ?? 300_000
     this.pendingToolTimeoutMs = options.pendingToolTimeoutMs ?? 60_000
-    for (const value of [this.maxConcurrent, this.turnTimeoutMs, this.pendingToolTimeoutMs]) if (!Number.isSafeInteger(value) || value <= 0) throw new Error("Antigravity limits must be positive integers")
+    this.idleConversationMs = options.idleConversationMs ?? this.pendingToolTimeoutMs
+    this.prewarmTtlMs = options.prewarmTtlMs ?? 600_000
+    this.modelsTtlMs = options.modelsTtlMs ?? 60_000
+    this.accountCheckTtlMs = options.accountCheckTtlMs ?? 0
+    this.prewarmCount = options.prewarm ?? 0
+    for (const value of [this.maxConcurrent, this.turnTimeoutMs, this.pendingToolTimeoutMs, this.idleConversationMs, this.prewarmTtlMs, this.modelsTtlMs]) if (!Number.isSafeInteger(value) || value <= 0) throw new Error("Antigravity limits must be positive integers")
+    for (const value of [this.accountCheckTtlMs, this.prewarmCount]) if (!Number.isSafeInteger(value) || value < 0) throw new Error("Antigravity cache and prewarm settings must be non-negative integers")
     this.state = options.statePath ? new AgState(options.statePath) : undefined
     try {
     this.nativeSessions = this.state && options.statePath ? new AgNativeSessions(this.state, options.statePath, options) : undefined
@@ -525,9 +623,13 @@ export class AntigravityRuntime {
     if (this.shutdown.signal.aborted) throw new AntigravityError("Antigravity is shutting down", 503, "api_error")
     const retryAfter = Math.ceil((this.accountRetryAt - Date.now()) / 1000)
     if (retryAfter > 0) throw new AntigravityError(`Antigravity account checks are cooling down after a CLI failure; retry in ${retryAfter} seconds. No model request was sent.`, 503, "api_error", retryAfter)
-    this.verifying ??= this.verifyAccountOnce().catch(error => this.probeFailed(error)).finally(() => { this.verifying = undefined })
+    // Operator opt-in: a recent successful check stands in for a new one. Any
+    // failure clears it, so a refused configuration is never served from cache.
+    if (this.accountCheckTtlMs > 0 && Date.now() - this.accountVerifiedAt < this.accountCheckTtlMs) return
+    this.verifying ??= this.verifyAccountOnce().then(() => { this.accountVerifiedAt = Date.now() }, error => { this.accountVerifiedAt = 0; return this.probeFailed(error) }).finally(() => { this.verifying = undefined })
     return this.verifying
   }
+  private accountVerifiedAt = 0
   private probeFailed(error: unknown): never {
     if (error instanceof ProbeFailure && error.reason !== 'cancelled') {
       this.accountRetryAt = Date.now() + 5000
@@ -540,7 +642,7 @@ export class AntigravityRuntime {
     const options = { env: this.childEnv, signal: this.shutdown.signal }
     this.cliVersion = (await readAgProbe(this.executable, "version", options)).trim()
     // Validate the binary before asking it to inspect subscription configuration.
-    if (this.cliVersion !== "1.2.7") throw new Error(`Unsupported agy version ${this.cliVersion}; this Meridian build validates agy 1.2.7. Validate a CLI upgrade before updating the compatibility gate.`)
+    if (this.cliVersion !== "1.2.7" && !this.options.acceptedCliVersions?.includes(this.cliVersion)) throw new Error(`Unsupported agy version ${this.cliVersion}; this Meridian build validates agy 1.2.7. Validate a CLI upgrade before updating the compatibility gate.`)
     const config = await readAgProbe(this.executable, "configuration", options)
     // The verified 1.2.7 effective settings expose an explicit boolean here.
     // Missing or malformed credits are indeterminate, not verified disabled.
@@ -549,8 +651,8 @@ export class AntigravityRuntime {
     if (customModels && (typeof customModels !== "object" || Object.keys(customModels).length > 0)) throw new Error("Antigravity custom model providers must be disabled for subscription-only access")
     if (settings.modelProvider || settings.useG1Credits || settings.gcp) throw new Error("Antigravity requires default account authentication with paid overage credits disabled; configure agy first")
   }
-  async availableModels(): Promise<string[]> {
-    if (Date.now() - this.checkedAt < 60_000) return this.models
+  async availableModels(maxAgeMs = this.modelsTtlMs): Promise<string[]> {
+    if (Date.now() - this.checkedAt < maxAgeMs) return this.models
     this.checking ??= (async () => {
       await this.verifyAccount()
       const output = await readAgProbe(this.executable, "models", { env: this.childEnv, signal: this.shutdown.signal }).catch(error => this.probeFailed(error))
@@ -584,17 +686,91 @@ export class AntigravityRuntime {
     })().catch(error => { this.initialization = undefined; throw error })
     return this.initialization
   }
+  /** The lean agent has no finish tool and no native catalog, so schema output and native grants keep the default agent. */
+  leanAgentFor(request: AgRequest): boolean {
+    return !!this.options.leanAgent && !request.output_config?.format && !agNativeTools(this.options).length
+  }
+  prewarmed = 0
+  // Pre-started processes by spawn-time shape. Insertion order is age.
+  private readonly spares = new Map<string, AntigravityRun>()
+  private prewarmable(request: AgRequest): boolean {
+    return this.prewarmCount > 0 && this.options.reuseConversations !== false && !agNativeTools(this.options).length &&
+      !request.output_config?.format && !request.stop_sequences?.length && !request.meridian_tool_grammars &&
+      // Without client tools the CLI is not auto-approved, and attachment reads need that decided at spawn.
+      (!hasAgImages(request.messages) || (request.tools.length > 0 && !!this.options.allowToolBridge))
+  }
+  /** Everything a process fixes when it starts: CLI flags, the deny hook's tool names and the MCP catalog it lists once. */
+  private spareKey(request: AgRequest): string {
+    return createHash("sha256").update(stable({ model: request.model, effort: request.output_config?.effort, tools: request.tools, tool_choice: request.tool_choice })).digest("hex")
+  }
+  private claimSpare(request: AgRequest): AntigravityRun | undefined {
+    if (!this.prewarmable(request)) return
+    const key = this.spareKey(request)
+    const spare = this.spares.get(key)
+    if (!spare) return
+    this.spares.delete(key)
+    if (!spare.prewarmed || !spare.reclaimable) return
+    spare.busy = true
+    return spare
+  }
+  /**
+   * Called only when a request needed a fresh process (cold start or adoption),
+   * never on live reuse: a shape earns a spare by opening new conversations, so
+   * alternating shapes that merely continue do not churn processes. Never displaces
+   * an active turn or a pending tool call.
+   */
+  private schedulePrewarm(request: AgRequest): void {
+    if (this.draining || !this.prewarmable(request)) return
+    const key = this.spareKey(request)
+    if (this.spares.has(key)) return
+    const replaced: Array<Promise<void>> = []
+    while (this.spares.size >= this.prewarmCount) {
+      const [oldest, run] = this.spares.entries().next().value!
+      this.spares.delete(oldest)
+      if (run.prewarmed && run.reclaimable) { run.abort(new Error("Prewarmed process replaced"), "retired"); replaced.push(run.settled) }
+    }
+    if (!replaced.length && this.runs.size + this.preparing >= this.maxConcurrent) {
+      // At capacity, only an idle conversation no client ever came back to (a
+      // one-shot request) makes room, oldest first. A conversation that has been
+      // continued keeps its process until its own idle lifetime ends.
+      const idle = [...this.runs.values()].filter(run => run.retirable && !run.continued).sort((a, b) => a.idleSince - b.idleSince)[0]
+      if (!idle) return
+      idle.busy = true
+      idle.abort(new Error("Idle conversation retired for a prewarmed process"), "retired")
+      replaced.push(idle.settled)
+    }
+    // Join anything retired first: its process still holds a slot until it exits.
+    if (replaced.length) { void Promise.all(replaced).then(() => this.schedulePrewarm(request)); return }
+    const tool_choice = request.tool_choice
+    // A template with the spawn-time shape only: no client instructions or history.
+    const template: AgRequest = { model: request.model, max_tokens: request.max_tokens, stream: false, messages: [], tools: request.tools, ...(tool_choice ? { tool_choice } : {}), ...(request.output_config ? { output_config: request.output_config } : {}) }
+    const run = new AntigravityRun(this, template, undefined, true)
+    this.runs.set(run.id, run)
+    this.spares.set(key, run)
+    run.ready = run.start()
+    run.ready.catch(error => console.error("[antigravity] Prewarm failed:", String(error)))
+    void run.settled.then(() => { if (this.spares.get(key) === run) this.spares.delete(key) })
+  }
   async create(request: AgRequest, signal?: AbortSignal): Promise<AntigravityRun> {
+    const admitted = await this.admit(request, signal)
+    // After the admission reservation is released, so the run is counted once.
+    if (admitted.fresh) this.schedulePrewarm(request)
+    return admitted.run
+  }
+  private async admit(request: AgRequest, signal?: AbortSignal): Promise<{ run: AntigravityRun; fresh: boolean }> {
     if (this.draining) throw new AntigravityError("Antigravity is shutting down", 503, "api_error")
     if (((request.tools.length && request.tool_choice?.type !== "none") || hasAgImages(request.messages)) && !this.options.allowToolBridge) throw new AntigravityError("Client tools and images require explicit MERIDIAN_AGY_ALLOW_TOOL_BRIDGE=1; see the Antigravity guide")
     const reusable = [...this.runs.values()].find(run => run.matches(request))
-    if (reusable) { await reusable.resume(request, signal); return reusable }
-    const reclaim = this.runs.size + this.preparing >= this.maxConcurrent
-      ? [...this.runs.values()].find(run => run.reclaimable) : undefined
-    if (this.runs.size + this.preparing >= this.maxConcurrent && !reclaim) throw new AntigravityError("Antigravity process capacity is full with active requests", 429, "rate_limit_error", 5)
+    if (reusable) { await reusable.resume(request, signal); return { run: reusable, fresh: false } }
+    // A matching spare already holds a process slot, so adopting it needs no admission.
+    let spare = this.claimSpare(request)
+    const full = !spare && this.runs.size + this.preparing >= this.maxConcurrent
+    const reclaim = full ? [...this.runs.values()].find(run => run.prewarmed && run.reclaimable) ?? [...this.runs.values()].find(run => run.reclaimable) : undefined
+    if (full && !reclaim) throw new AntigravityError("Antigravity process capacity is full with active requests", 429, "rate_limit_error", 5)
     // Reserve admission and claim the idle process synchronously, before waiting
     // for exit. Concurrent admissions cannot reclaim the same process or exceed capacity.
-    this.preparing++
+    const reserved = !spare
+    if (reserved) this.preparing++
     if (reclaim) {
       reclaim.busy = true
       reclaim.abort(new AntigravityError("Idle tool process reclaimed; completed history can be replayed", 409), "reclaimed")
@@ -602,20 +778,31 @@ export class AntigravityRuntime {
     try {
       if (reclaim) await reclaim.settled
       await this.initialize()
-      // Model discovery may be cached, subscription/provider authorization cannot be.
+      // Model discovery may be cached, subscription/provider authorization cannot be
+      // unless the operator set an explicit account-check lifetime.
       await this.verifyAccount()
-      if (!(await this.availableModels()).includes(request.model)) throw new AntigravityError("Unknown Antigravity model; use GET /v1/models for account model slugs")
+      if (!(await this.availableModels()).includes(request.model) && !(await this.availableModels(Math.min(this.modelsTtlMs, 60_000))).includes(request.model)) throw new AntigravityError("Unknown Antigravity model; use GET /v1/models for account model slugs")
       if (this.draining) throw new AntigravityError("Antigravity is shutting down", 503, "api_error")
       if (signal?.aborted) throw new AntigravityError("Request cancelled", 499, "api_error")
       const restored = this.nativeSessions?.claim(request)
+      if (spare && !restored) {
+        const adopted = spare
+        spare = undefined
+        if (await adopted.adopt(request, signal)) return { run: adopted, fresh: true }
+      }
       const run = new AntigravityRun(this, request, restored)
       if (restored) this.restored++
       this.runs.set(run.id, run)
       const cancel = () => run.abort(new AntigravityError("Request cancelled", 499, "api_error"))
       signal?.addEventListener("abort", cancel, { once: true })
       try { await run.start() } finally { signal?.removeEventListener("abort", cancel) }
-      return run
-    } finally { this.preparing-- }
+      return { run, fresh: true }
+    } finally {
+      // A claimed spare that was not adopted (failed admission, or a restorable
+      // native conversation took precedence) is retired rather than left busy.
+      if (spare?.prewarmed) spare.abort(new Error("Prewarmed process released"), "retired")
+      if (reserved) this.preparing--
+    }
   }
   private async handleMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     let rpcId: string | number | undefined

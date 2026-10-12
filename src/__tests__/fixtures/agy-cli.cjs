@@ -11,6 +11,7 @@ async function main(inputPrompt) {
   let prompt = args[args.indexOf('-p') + 1]
   if (inputPrompt !== undefined) prompt = inputPrompt
   nativePrompts.push(prompt)
+  if (prompt === '/config' && process.env.AGY_FIXTURE_PROBE_LOG) require('node:fs').appendFileSync(process.env.AGY_FIXTURE_PROBE_LOG, 'config\n')
   if (prompt === '/config' && process.env.AGY_FIXTURE_CONFIG_EXIT) return process.exit(2)
   if (prompt === '/config') return emit({ command: { data: { config: { customModelsConfig: process.env.AGY_FIXTURE_CUSTOM ? { fixture: {} } : {}, modelProvider: process.env.AGY_FIXTURE_API ? 'gemini' : '', useG1Credits: false } } } })
   if (prompt === '/usage') return emit({command:{data:{groups:[{name:'Gemini Models',buckets:[{id:'gemini-5h',window:'5h',remaining_fraction:0.75,reset_time:'2099-01-01T00:00:00Z'}]}]}}})
@@ -35,6 +36,11 @@ async function main(inputPrompt) {
     }
   }
   if (prompt.includes('EFFORT_PROBE') && args[args.indexOf('--effort') + 1] !== 'high') throw new Error('Native effort flag missing')
+  if (prompt.includes('LEAN_PROBE')) {
+    const agent = args.includes('--agent') && args[args.indexOf('--agent') + 1]
+    if (agent !== 'meridian-client' || !/^tools:\n {2}- view_file$/m.test(readFileSync('.agents/agents/meridian-client.md', 'utf8'))) throw new Error('Lean agent missing')
+  }
+  if (prompt.includes('DEFAULT_AGENT_PROBE') && args.includes('--agent')) throw new Error('Unexpected agent override')
   emit({ event: 'init' })
   if (prompt.includes('RATE_LIMIT')) return emit({event:'result',result:{status:'ERROR',error:'Quota exhausted; retry in 45 seconds'}})
   if (prompt.includes('HANG')) { setInterval(() => {}, 1000); return }

@@ -55,6 +55,13 @@ Environment variables:
   MERIDIAN_AGY_TURN_TIMEOUT_MS      Active CLI turn deadline (default: 300000)
   MERIDIAN_AGY_TOOL_TIMEOUT_MS      Idle client-tool wait (default: 60000)
   MERIDIAN_AGY_MAX_CONCURRENT       Maximum CLI processes (default: 4)
+  MERIDIAN_AGY_IDLE_TIMEOUT_MS      Idle live-conversation retention (default: tool timeout)
+  MERIDIAN_AGY_ACCEPT_VERSIONS      Extra agy versions you validated (comma-separated)
+  MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS Reuse a successful account check (default: 0, always check)
+  MERIDIAN_AGY_MODELS_TTL_MS        Model list cache lifetime (default: 60000)
+  MERIDIAN_AGY_LEAN_AGENT           Use a minimal agent instead of the CLI default (1)
+  MERIDIAN_AGY_PREWARM              Pre-started CLI processes to keep ready (default: 0)
+  MERIDIAN_AGY_PREWARM_TTL_MS       Unused pre-started process lifetime (default: 600000)
   MERIDIAN_AGY_PLUGIN_PATHS         JSON array of Antigravity plugin modules
   MERIDIAN_AGY_GRAMMAR_PYTHON       Local Python with Lark for custom grammars
   MERIDIAN_AGY_PATH                 Official agy executable (default: agy)

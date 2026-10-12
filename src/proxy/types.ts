@@ -25,6 +25,20 @@ export interface AntigravityOptions {
   browserMcpExecutable?: string
   allowNativeSubagents?: boolean
   pendingToolTimeoutMs?: number
+  /** Extra official CLI versions the operator has validated locally, beside the built-in gate. */
+  acceptedCliVersions?: string[]
+  /** Reuse a successful version/configuration check for this long. 0 verifies every admission. */
+  accountCheckTtlMs?: number
+  /** Account model catalog cache lifetime. Unknown models still force one refresh. */
+  modelsTtlMs?: number
+  /** Idle retention of a completed live conversation. Defaults to pendingToolTimeoutMs. */
+  idleConversationMs?: number
+  /** Run under a minimal Meridian agent instead of the CLI's default persona and native tool catalog. */
+  leanAgent?: boolean
+  /** Idle pre-started CLI processes kept for recently used request shapes. 0 disables. */
+  prewarm?: number
+  /** Lifetime of an unused pre-started process. */
+  prewarmTtlMs?: number
 }
 
 export interface ProxyConfig {
@@ -82,6 +96,13 @@ export function resolveBackendConfig(config: Partial<ProxyConfig>): ProxyConfig 
       maxConcurrent: process.env.MERIDIAN_AGY_MAX_CONCURRENT === undefined ? undefined : Number(process.env.MERIDIAN_AGY_MAX_CONCURRENT),
       turnTimeoutMs: process.env.MERIDIAN_AGY_TURN_TIMEOUT_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_TURN_TIMEOUT_MS),
       pendingToolTimeoutMs: process.env.MERIDIAN_AGY_TOOL_TIMEOUT_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_TOOL_TIMEOUT_MS),
+      acceptedCliVersions: process.env.MERIDIAN_AGY_ACCEPT_VERSIONS ? process.env.MERIDIAN_AGY_ACCEPT_VERSIONS.split(",").map(version => version.trim()).filter(Boolean) : undefined,
+      accountCheckTtlMs: process.env.MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS),
+      modelsTtlMs: process.env.MERIDIAN_AGY_MODELS_TTL_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_MODELS_TTL_MS),
+      idleConversationMs: process.env.MERIDIAN_AGY_IDLE_TIMEOUT_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_IDLE_TIMEOUT_MS),
+      leanAgent: process.env.MERIDIAN_AGY_LEAN_AGENT === "1",
+      prewarm: process.env.MERIDIAN_AGY_PREWARM === undefined ? undefined : Number(process.env.MERIDIAN_AGY_PREWARM),
+      prewarmTtlMs: process.env.MERIDIAN_AGY_PREWARM_TTL_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_PREWARM_TTL_MS),
       ...config.antigravity,
     } } : {}),
   }
