@@ -60,6 +60,7 @@ Environment variables:
   MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS Reuse a successful account check (default: 0, always check)
   MERIDIAN_AGY_MODELS_TTL_MS        Model list cache lifetime (default: 60000)
   MERIDIAN_AGY_LEAN_AGENT           Use a minimal agent instead of the CLI default (1)
+  MERIDIAN_AGY_IGNORE_SAMPLING      Drop temperature/top_p/penalties/seed instead of refusing (1)
   MERIDIAN_AGY_PREWARM              Pre-started CLI processes to keep ready (default: 0)
   MERIDIAN_AGY_PREWARM_TTL_MS       Unused pre-started process lifetime (default: 600000)
   MERIDIAN_AGY_PLUGIN_PATHS         JSON array of Antigravity plugin modules

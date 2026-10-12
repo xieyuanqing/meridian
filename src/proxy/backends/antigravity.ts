@@ -15,7 +15,7 @@ import { buildRuntime } from "../buildRuntime"
 import { hasValidApiKey } from "../auth"
 import { headerSettingsResponse, healthHostname } from "../../headerSettings"
 import { AntigravityRuntime, type AntigravityRun } from "./antigravityRuntime"
-import { AntigravityError, forcedAgTool, toolChoiceInstruction, blocks, contractKey, historyKey, sameAgExecutionContract, parseAgRequest, type AgBlock, type AgResult, type AgRequest } from "./antigravityProtocol"
+import { AntigravityError, forcedAgTool, toolChoiceInstruction, blocks, contractKey, historyKey, sameAgExecutionContract, parseAgRequest, dropAgSamplingControls, type AgBlock, type AgResult, type AgRequest } from "./antigravityProtocol"
 
 function errorResponse(error: unknown): Response {
   const e = error instanceof AntigravityError ? error : new AntigravityError(error instanceof Error ? error.message : String(error), 503, "api_error")
@@ -42,6 +42,8 @@ async function readBody(request: Request): Promise<unknown> {
 export function createAntigravityServer(config: ProxyConfig, runtime = new AntigravityRuntime({ ...config.antigravity, maxConcurrent: config.antigravity?.maxConcurrent ?? config.maxConcurrent })): ProxyServer & { closeBackend(): Promise<void>; providerStatus(): Promise<ProviderUsage> } {
   if (config.profiles?.length || config.defaultProfile) throw new Error("Antigravity does not support Claude profile configuration")
   const responses = new AgResponseStore(undefined, undefined, runtime.state)
+  // Sampling settings are refused by default; the operator may choose to drop them instead.
+  const clientBody = async (request: Request): Promise<unknown> => runtime.options.ignoreSamplingControls ? dropAgSamplingControls(await readBody(request)) : await readBody(request)
   const completedAnswers = new AgCompletedAnswers(runtime.state)
   const responseJobs = new AgResponseJobs(responses)
   async function recoverResults(body: AgRequest, signal: AbortSignal, results: AgResult[], previous?: AntigravityRun): Promise<AntigravityRun> {
@@ -114,7 +116,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
   async function messages(request: Request, saveCompletedAnswers = true): Promise<Response> {
     if (runtime.draining) throw new AntigravityError("Antigravity is shutting down", 503, "api_error")
     if (request.headers.has("x-meridian-profile")) throw new AntigravityError("Antigravity uses the current agy account; Claude profile routing is unavailable")
-    const body = parseAgRequest(await runtime.plugins.request(await readBody(request), request.signal), runtime.options.adaptThinkingBudgets)
+    const body = parseAgRequest(await runtime.plugins.request(await clientBody(request), request.signal), runtime.options.adaptThinkingBudgets)
     if (request.signal.aborted) throw new AntigravityError("Request cancelled", 499, "api_error")
     const adaptationHeaders: Record<string, string> = runtime.options.adaptThinkingBudgets ? {
       "x-meridian-thinking-budgets": "approximate-effort",
@@ -321,8 +323,8 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
         const models = await runtime.availableModels()
         return Response.json({ object: "list", data: models.map(id => ({ id, type: "model", object: "model", display_name: id, owned_by: "antigravity" })), has_more: false, first_id: models[0], last_id: models.at(-1) })
       }
-      if (request.method === "POST" && path === "/v1/messages/count_tokens") return Response.json(estimateAgTokens(parseAgRequest(await readBody(request), runtime.options.adaptThinkingBudgets)), { headers: { "x-meridian-token-count": "estimate" } })
-      if (request.method === "POST" && path === "/v1/responses/input_tokens") return await agOpenai(request, await readBody(request), true, request => messages(request, false), responses, responseJobs, { countTokens: true })
+      if (request.method === "POST" && path === "/v1/messages/count_tokens") return Response.json(estimateAgTokens(parseAgRequest(await clientBody(request), runtime.options.adaptThinkingBudgets)), { headers: { "x-meridian-token-count": "estimate" } })
+      if (request.method === "POST" && path === "/v1/responses/input_tokens") return await agOpenai(request, await clientBody(request), true, request => messages(request, false), responses, responseJobs, { countTokens: true })
       const storedResponse = /^\/v1\/responses\/(resp_agy_[a-f0-9]{32})(?:\/(input_items|cancel))?$/.exec(path)
       if (storedResponse) {
         const id = storedResponse[1]!, operation = storedResponse[2]
@@ -358,7 +360,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
           return Response.json(current.response, { headers: { 'cache-control': 'no-store' } })
         }
       }
-      if (request.method === "POST" && ["/v1/chat/completions", "/v1/responses"].includes(path)) return await agOpenai(request, await readBody(request), path === "/v1/responses", request => messages(request, false), responses, responseJobs)
+      if (request.method === "POST" && ["/v1/chat/completions", "/v1/responses"].includes(path)) return await agOpenai(request, await clientBody(request), path === "/v1/responses", request => messages(request, false), responses, responseJobs)
       if (request.method === "POST" && ["/v1/messages", "/messages"].includes(path)) return await messages(request)
       return errorResponse(new AntigravityError("Endpoint unavailable on the Antigravity backend", 404, "not_found_error"))
     } catch (error) { return errorResponse(error) }

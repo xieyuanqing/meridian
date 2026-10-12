@@ -64,6 +64,18 @@ const schema = z.object({
   stop_sequences: z.array(z.string().min(1).max(1024)).max(4).optional(),
 }).passthrough()
 
+/** Request fields that only shape token sampling. The CLI exposes none of them. */
+export const AG_SAMPLING_CONTROLS = ["temperature", "top_p", "top_k", "min_p", "typical_p", "presence_penalty", "frequency_penalty", "repetition_penalty", "seed", "logit_bias"]
+/**
+ * Operator opt-in for clients that always send sampling settings: remove them
+ * from a raw Messages, Chat Completions or Responses body instead of refusing
+ * the request. Fields that change what is returned (n, logprobs) stay refused.
+ */
+export function dropAgSamplingControls(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !AG_SAMPLING_CONTROLS.includes(key)))
+}
+
 export type AgRequest = z.infer<typeof schema>
 export type AgMessage = z.infer<typeof message>
 export type AgBlock = z.infer<typeof block>

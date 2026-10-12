@@ -214,6 +214,7 @@ directories. Meridian does not edit or garbage-collect those private records.
 | `MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS` | `0` | Reuse a successful version/configuration check for this long; `0` checks every admission |
 | `MERIDIAN_AGY_MODELS_TTL_MS` | `60000` | Account model list cache lifetime |
 | `MERIDIAN_AGY_LEAN_AGENT` | off | Run under a minimal Meridian agent instead of the CLI's default agent |
+| `MERIDIAN_AGY_IGNORE_SAMPLING` | off | Drop sampling settings from requests instead of refusing them |
 | `MERIDIAN_AGY_PREWARM` | `0` | Idle pre-started CLI processes to keep for recently used request shapes |
 | `MERIDIAN_AGY_PREWARM_TTL_MS` | `600000` | Lifetime of an unused pre-started process |
 
@@ -256,6 +257,14 @@ the client's instructions as its system prompt. The deny hook is unchanged and
 still decides every tool call. Requests with a JSON schema, and services with
 native browser or subagents enabled, keep the default agent, because the lean
 agent has no `finish` tool or native catalog.
+
+**Ignored sampling settings.** The CLI has no sampling controls, so a request
+carrying `temperature`, `top_p`, `top_k`, `min_p`, `typical_p`, a presence,
+frequency or repetition penalty, `seed` or `logit_bias` is refused by default.
+Many clients send these on every request. `MERIDIAN_AGY_IGNORE_SAMPLING=1`
+removes them before validation on the Messages, Chat Completions and Responses
+routes. The client is not told its setting had no effect. Fields that change
+what is returned, such as `n` above 1 and `logprobs`, are still refused.
 
 **Prewarmed processes.** With `MERIDIAN_AGY_PREWARM=1`, after a request needed a
 fresh CLI process, Meridian starts one more with an empty conversation for the

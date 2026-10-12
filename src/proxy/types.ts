@@ -39,6 +39,8 @@ export interface AntigravityOptions {
   prewarm?: number
   /** Lifetime of an unused pre-started process. */
   prewarmTtlMs?: number
+  /** Drop sampling settings (temperature, top_p, penalties, seed...) instead of refusing the request. */
+  ignoreSamplingControls?: boolean
 }
 
 export interface ProxyConfig {
@@ -101,6 +103,7 @@ export function resolveBackendConfig(config: Partial<ProxyConfig>): ProxyConfig 
       modelsTtlMs: process.env.MERIDIAN_AGY_MODELS_TTL_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_MODELS_TTL_MS),
       idleConversationMs: process.env.MERIDIAN_AGY_IDLE_TIMEOUT_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_IDLE_TIMEOUT_MS),
       leanAgent: process.env.MERIDIAN_AGY_LEAN_AGENT === "1",
+      ignoreSamplingControls: process.env.MERIDIAN_AGY_IGNORE_SAMPLING === "1",
       prewarm: process.env.MERIDIAN_AGY_PREWARM === undefined ? undefined : Number(process.env.MERIDIAN_AGY_PREWARM),
       prewarmTtlMs: process.env.MERIDIAN_AGY_PREWARM_TTL_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_PREWARM_TTL_MS),
       ...config.antigravity,
