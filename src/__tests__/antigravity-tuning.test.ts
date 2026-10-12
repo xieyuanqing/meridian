@@ -136,6 +136,69 @@ describe("Antigravity operator tuning", () => {
   })
 })
 
+describe("Antigravity long requests and resumed conversations", () => {
+  it("continues a live conversation when the client trimmed or padded the assistant text", async () => {
+    const { send, runtime } = fixture()
+    const request = text("NATIVE_FIRST")
+    expect((await decode(await send(request))).content[0]!.text).toBe("READY")
+    const next = await decode(await send({ ...request, messages: [...request.messages, { role: "assistant", content: "  READY\n" }, { role: "user", content: "NATIVE_SECOND" }] }))
+    expect(next.content[0]!.text).toBe("NATIVE_REUSED")
+    expect(runtime.reused).toBe(1)
+  })
+
+  it("delivers a request longer than one CLI message in acknowledged parts, losing nothing", async () => {
+    const { send } = fixture({ messageBytes: 2048, requestBytes: 64_000 })
+    const filler = "é🧪x ".repeat(1200)
+    const messages = [{ role: "user", content: "ECHO_TAIL " + filler }, { role: "assistant", content: filler }, { role: "user", content: filler + "TAIL-MARKER-0123456789" }]
+    const reply = await decode(await send({ ...text(""), messages }))
+    // The fixture parses the joined conversation, so a lost or reordered byte fails before it answers.
+    expect(reply.content.map(block => block.text).join("")).toBe("TAIL-MARKER-0123456789")
+    expect(reply.stop_reason).toBe("end_turn")
+  })
+
+  it("refuses a request above the whole budget instead of cutting it", async () => {
+    const { send, runtime } = fixture({ messageBytes: 2048, requestBytes: 8192 })
+    const refused = await send(text("x".repeat(9000)))
+    expect(refused.status).toBe(400)
+    expect(JSON.stringify(await refused.json())).toContain("prompt is too long")
+    expect(runtime.runs.size).toBe(0)
+  })
+
+  it("fails the turn when the CLI acts before the whole request arrived", async () => {
+    const { send } = fixture({ messageBytes: 2048, requestBytes: 64_000 })
+    expect((await send(text("PRELOAD_TOOL " + "y".repeat(6000), { tools: [tool] }))).status).toBe(502)
+  })
+
+  it("lets the CLI read back only this conversation's saved tool results", async () => {
+    const { send } = fixture()
+    expect((await decode(await send(text("SPILL_PROBE")))).content[0]!.text).toBe("READY")
+  })
+
+  it("resumes a conversation from disk for the configured lifetime", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "meridian-agy-resume-"))
+    try {
+      const { send, runtime } = fixture({ statePath: join(directory, "state.sqlite"), idleConversationMs: 50, nativeSessionTtlMs: 6 * 3_600_000 })
+      runtime.childEnv.AGY_FIXTURE_CONVERSATION = "11111111-2222-4333-8444-555555555555"
+      const request = text("NATIVE_FIRST")
+      expect((await decode(await send(request))).content[0]!.text).toBe("READY")
+      await until(() => runtime.runs.size === 0 && runtime.state!.records("native-sessions").length === 1)
+      const lifetime = runtime.state!.records("native-sessions")[0]!.expires - Date.now()
+      expect(lifetime).toBeGreaterThan(5 * 3_600_000)
+      const next = await decode(await send({ ...request, messages: [...request.messages, { role: "assistant", content: "READY" }, { role: "user", content: "RESTORED_PROBE" }] }))
+      expect(next.content[0]!.text).toBe("READY")
+      expect(runtime.restored).toBe(1)
+    } finally { for (const close of closing.splice(0)) await close(); await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it("validates the message and request sizes", () => {
+    const defaults = new AntigravityRuntime()
+    expect([defaults.messageBytes, defaults.requestBytes]).toEqual([160_000, 640_000])
+    expect(() => new AntigravityRuntime({ messageBytes: 192_000 })).toThrow("CLI's own cut")
+    expect(() => new AntigravityRuntime({ messageBytes: 4096, requestBytes: 1024 })).toThrow("at least one message")
+    expect(() => new AntigravityRuntime({ nativeSessionTtlMs: 0 })).toThrow("positive")
+  })
+})
+
 describe("Antigravity prewarmed processes", () => {
   it("serves the next new conversation of the same shape from a spare and keeps one ready", async () => {
     const { send, runtime } = fixture({ prewarm: 1 })

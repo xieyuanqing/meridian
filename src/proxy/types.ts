@@ -41,6 +41,12 @@ export interface AntigravityOptions {
   prewarmTtlMs?: number
   /** Drop sampling settings (temperature, top_p, penalties, seed...) instead of refusing the request. */
   ignoreSamplingControls?: boolean
+  /** Largest single CLI message. The CLI silently cuts a message at 192,000 bytes; longer requests are delivered in parts. */
+  messageBytes?: number
+  /** Largest rendered request. Anything above is refused as too long instead of being cut. */
+  requestBytes?: number
+  /** How long a completed conversation stays resumable from disk after its process ends. Needs statePath. */
+  nativeSessionTtlMs?: number
 }
 
 export interface ProxyConfig {
@@ -106,6 +112,9 @@ export function resolveBackendConfig(config: Partial<ProxyConfig>): ProxyConfig 
       ignoreSamplingControls: process.env.MERIDIAN_AGY_IGNORE_SAMPLING === "1",
       prewarm: process.env.MERIDIAN_AGY_PREWARM === undefined ? undefined : Number(process.env.MERIDIAN_AGY_PREWARM),
       prewarmTtlMs: process.env.MERIDIAN_AGY_PREWARM_TTL_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_PREWARM_TTL_MS),
+      messageBytes: process.env.MERIDIAN_AGY_MESSAGE_BYTES === undefined ? undefined : Number(process.env.MERIDIAN_AGY_MESSAGE_BYTES),
+      requestBytes: process.env.MERIDIAN_AGY_REQUEST_BYTES === undefined ? undefined : Number(process.env.MERIDIAN_AGY_REQUEST_BYTES),
+      nativeSessionTtlMs: process.env.MERIDIAN_AGY_SESSION_TTL_MS === undefined ? undefined : Number(process.env.MERIDIAN_AGY_SESSION_TTL_MS),
       ...config.antigravity,
     } } : {}),
   }
