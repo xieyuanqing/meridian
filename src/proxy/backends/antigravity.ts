@@ -86,8 +86,25 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       const run = runtime.toolOwners.get(result.tool_use_id)
       if (!run) throw new AntigravityError("Antigravity continuation contains an unknown live tool", 409)
       if (run.busy) throw new AntigravityError("Antigravity turn already has an active response", 409)
-      if (results.length !== run.delivered.length || results.some(result => !run.delivered.some(call => call.id === result.tool_use_id)) || owners.some(owner => owner !== run) || historyKey(run.history) !== historyKey(body.messages.slice(0, suffixStart))) {
-        throw new AntigravityError("Pending Antigravity tool continuation changed its delivered history or tool batch", 409)
+      const others = [...new Set(owners)].filter(owner => owner !== run)
+      const batchChanged = results.length !== run.delivered.length || results.some(result => !run.delivered.some(call => call.id === result.tool_use_id))
+      const historyChanged = historyKey(run.history) !== historyKey(body.messages.slice(0, suffixStart))
+      if (batchChanged || others.length || historyChanged) {
+        const prefix = body.messages.slice(0, suffixStart)
+        // Clients may rewrite the delivered batch itself before persisting it
+        // (Hermes splits one multi-entry tool_call into several tool_use blocks with
+        // new IDs). Same conversation, every delivered call answered: the client
+        // already ran each tool, so its complete history is a valid stateless replay.
+        // Any other divergence may be a fork and must not retire the live owner.
+        const expandedBatch = !others.length && prefix.length === run.history.length && prefix.at(-1)?.role === "assistant"
+          && historyKey(prefix.slice(0, -1)) === historyKey(run.history.slice(0, -1))
+          && run.delivered.every(call => results.some(result => result.tool_use_id === call.id))
+        const firstDiff = prefix.findIndex((message, index) => !run.history[index] || historyKey([message]) !== historyKey([run.history[index]!]))
+        console.warn("[antigravity] Pending tool continuation diverged:", JSON.stringify({ expandedBatch, batchChanged, otherOwners: others.length, historyChanged, delivered: run.delivered.length, results: results.length, knownResults: owners.length, historyLength: run.history.length, clientLength: prefix.length, firstDiff }))
+        if (!expandedBatch || runtime.options.allowNativeBrowser || runtime.options.allowNativeSubagents || !sameAgExecutionContract(run.request, body)) {
+          throw new AntigravityError("Pending Antigravity tool continuation changed its delivered history or tool batch", 409)
+        }
+        return recoverResults(body, signal, continuationResults, run)
       }
       if (run.contract !== contractKey(body)) {
         if (!sameAgExecutionContract(run.request, body)) throw new AntigravityError("Pending Antigravity tool continuation changed its model, session or execution controls", 409)
