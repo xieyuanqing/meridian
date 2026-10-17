@@ -15,7 +15,7 @@ import { buildRuntime } from "../buildRuntime"
 import { hasValidApiKey } from "../auth"
 import { headerSettingsResponse, healthHostname } from "../../headerSettings"
 import { AntigravityRuntime, type AntigravityRun } from "./antigravityRuntime"
-import { AntigravityError, forcedAgTool, toolChoiceInstruction, blocks, contractKey, historyKey, sameAgExecutionContract, parseAgRequest, dropAgSamplingControls, type AgBlock, type AgResult, type AgRequest } from "./antigravityProtocol"
+import { AntigravityError, forcedAgTool, toolChoiceInstruction, blocks, contractKey, historyKey, mergeExpandedAgBatch, sameAgExecutionContract, parseAgRequest, dropAgSamplingControls, type AgBlock, type AgResult, type AgRequest } from "./antigravityProtocol"
 
 function errorResponse(error: unknown): Response {
   const e = error instanceof AntigravityError ? error : new AntigravityError(error instanceof Error ? error.message : String(error), 503, "api_error")
@@ -89,22 +89,25 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       const others = [...new Set(owners)].filter(owner => owner !== run)
       const batchChanged = results.length !== run.delivered.length || results.some(result => !run.delivered.some(call => call.id === result.tool_use_id))
       const historyChanged = historyKey(run.history) !== historyKey(body.messages.slice(0, suffixStart))
+      let accepted = results
       if (batchChanged || others.length || historyChanged) {
         const prefix = body.messages.slice(0, suffixStart)
         // Clients may rewrite the delivered batch itself before persisting it
         // (Hermes splits one multi-entry tool_call into several tool_use blocks with
-        // new IDs). Same conversation, every delivered call answered: the client
-        // already ran each tool, so its complete history is a valid stateless replay.
+        // new IDs). Same conversation, every delivered call answered: an exact split
+        // folds back into the live process; otherwise the client already ran each
+        // tool, so its complete history is a valid stateless replay.
         // Any other divergence may be a fork and must not retire the live owner.
         const expandedBatch = !others.length && prefix.length === run.history.length && prefix.at(-1)?.role === "assistant"
           && historyKey(prefix.slice(0, -1)) === historyKey(run.history.slice(0, -1))
           && run.delivered.every(call => results.some(result => result.tool_use_id === call.id))
+        const merged = expandedBatch ? mergeExpandedAgBatch(run.delivered, run.history.at(-1), prefix.at(-1)!, results) : undefined
+        const refused = !expandedBatch || runtime.options.allowNativeBrowser || runtime.options.allowNativeSubagents || !sameAgExecutionContract(run.request, body)
         const firstDiff = prefix.findIndex((message, index) => !run.history[index] || historyKey([message]) !== historyKey([run.history[index]!]))
-        console.warn("[antigravity] Pending tool continuation diverged:", JSON.stringify({ expandedBatch, batchChanged, otherOwners: others.length, historyChanged, delivered: run.delivered.length, results: results.length, knownResults: owners.length, historyLength: run.history.length, clientLength: prefix.length, firstDiff }))
-        if (!expandedBatch || runtime.options.allowNativeBrowser || runtime.options.allowNativeSubagents || !sameAgExecutionContract(run.request, body)) {
-          throw new AntigravityError("Pending Antigravity tool continuation changed its delivered history or tool batch", 409)
-        }
-        return recoverResults(body, signal, continuationResults, run)
+        console.warn("[antigravity] Pending tool continuation diverged:", JSON.stringify({ action: refused ? "refuse" : merged ? "merge" : "replay", batchChanged, otherOwners: others.length, historyChanged, delivered: run.delivered.length, results: results.length, knownResults: owners.length, historyLength: run.history.length, clientLength: prefix.length, firstDiff }))
+        if (refused) throw new AntigravityError("Pending Antigravity tool continuation changed its delivered history or tool batch", 409)
+        if (!merged) return recoverResults(body, signal, continuationResults, run)
+        accepted = merged
       }
       if (run.contract !== contractKey(body)) {
         if (!sameAgExecutionContract(run.request, body)) throw new AntigravityError("Pending Antigravity tool continuation changed its model, session or execution controls", 409)
@@ -119,12 +122,14 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       run.request.tool_choice = body.tool_choice
       run.busy = true
       run.history = body.messages
-      try { await run.accept(results, followup) }
+      try { await run.accept(accepted, followup) }
       catch (error) {
         run.busy = false
         run.abort(error instanceof Error ? error : new Error(String(error)))
         throw error
       }
+      // Folded split children are answered too; keep their duplicate protection.
+      for (const result of results) if (!accepted.includes(result)) runtime.rememberConsumedTool(result.tool_use_id)
       return run
     }
     return recoverResults(body, signal, continuationResults)

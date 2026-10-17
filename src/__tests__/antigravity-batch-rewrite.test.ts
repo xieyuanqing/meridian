@@ -41,6 +41,52 @@ describe("Antigravity client-rewritten tool batches", () => {
     expect(runtime.hasConsumedTool("call_split_1")).toBe(true)
   })
 
+  // Exact Hermes split of a multi-entry call: first child keeps the delivered ID.
+  function hermesSplit(body: AgRequest, content: AgBlock[], edit = false): AgRequest {
+    const call = content.find(b => b.type === "tool_use")! as Extract<AgBlock, { type: "tool_use" }>
+    const entries = (call.input.calls as unknown[]).map((entry, n) => edit && n === 2 ? { name: "lookup", arguments: { key: "edited" } } : entry)
+    const split = entries.map((entry, n) => ({ ...call, id: n ? `call_split_${n}` : call.id, input: { calls: [entry] } }))
+    return { ...body, messages: [...body.messages, { role: "assistant", content: [...content.filter(b => b.type !== "tool_use"), ...split] }, { role: "user", content: split.map((b, n) => ({ type: "tool_result" as const, tool_use_id: b.id, content: `R${n}` })) }] }
+  }
+
+  for (const reuseConversations of [false, true]) it(`folds an exact split back into the live process without replay (reuse=${reuseConversations})`, async () => {
+    const { send, runtime } = fixture({ reuseConversations })
+    const initial = request("BATCH_CALLS")
+    const first = await send(initial)
+    expect(first.status, await first.clone().text()).toBe(200)
+    const answer = await first.json() as { content: AgBlock[] }
+    const live = [...runtime.runs.values()][0]
+    const continuation = hermesSplit(initial, answer.content)
+    const response = await send(continuation)
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect((await response.json() as { content: AgBlock[] }).content).toEqual([{ type: "text", text: "[entry 1 of 3]R0[entry 2 of 3]R1[entry 3 of 3]R2" }])
+    expect(runtime.requests.at(0)?.continuation).toBe("tool-result")
+    expect(runtime.requests.some(r => r.continuation === "client-context-replay")).toBe(false)
+    expect(["call_split_1", "call_split_2"].every(id => runtime.hasConsumedTool(id))).toBe(true)
+    if (reuseConversations) {
+      // The client's split history is now the live history: the next turn stays live.
+      expect([...runtime.runs.values()][0]).toBe(live)
+      const done = runtime.requests.at(0)!
+      const next = await send({ ...continuation, messages: [...continuation.messages, { role: "assistant", content: [{ type: "text", text: "[entry 1 of 3]R0[entry 2 of 3]R1[entry 3 of 3]R2" }] }, { role: "user", content: "SKIP_TOOLS next turn" }] })
+      expect(next.status, await next.clone().text()).toBe(200)
+      expect(runtime.requests.at(0)).not.toBe(done)
+      expect(runtime.requests.at(0)?.continuation).toBe("live")
+    }
+    const duplicate = await send(continuation)
+    expect([200, 409]).toContain(duplicate.status)
+    if (duplicate.status === 200) expect(duplicate.headers.get("x-meridian-response-replayed")).toBe("true")
+  })
+
+  it("replays instead of folding when a split child no longer matches the delivered entries", async () => {
+    const { send, runtime } = fixture()
+    const initial = request("BATCH_CALLS")
+    const answer = await (await send(initial)).json() as { content: AgBlock[] }
+    const response = await send(hermesSplit(initial, answer.content, true))
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect((await response.json() as { content: AgBlock[] }).content).toEqual([{ type: "text", text: "R0|R1|R2" }])
+    expect(runtime.requests.at(0)?.continuation).toBe("client-context-replay")
+  })
+
   it("still refuses an earlier-history fork and keeps the live owner for the real continuation", async () => {
     const { send, runtime } = fixture()
     const initial = request("lookup")
