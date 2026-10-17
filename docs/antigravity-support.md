@@ -99,7 +99,15 @@ or active-resume guarantee. No automatic client-side reconciliation UI is claime
 
 ## Practical execution budgets
 
-`MERIDIAN_AGY_TURN_TIMEOUT_MS` bounds an active CLI turn (default 300,000 ms).
+`MERIDIAN_AGY_TURN_TIMEOUT_MS` bounds each active model response (default
+300,000 ms), not the cumulative duration of a multi-step client tool chain.
+The bridge pauses this deadline when delivering tools and renews it after
+accepting the complete result batch. It owns deadlines with CLI
+`--print-timeout 0`, so the CLI cannot independently expire a healthy tool chain.
+An exact timed-out result continuation can recover after its old process has
+exited, only before another tool batch was committed and with native browser
+and subagent capabilities disabled; client results are replayed as history,
+never re-executed. Successful duplicate protection remains unchanged.
 `MERIDIAN_AGY_TOOL_TIMEOUT_MS` bounds idle waiting for a client result
 (default 60,000 ms); a late result can recover through completed history.
 `MERIDIAN_AGY_MAX_CONCURRENT` bounds concurrent CLI processes (default 4).

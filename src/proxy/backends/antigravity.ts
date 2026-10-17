@@ -227,11 +227,12 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
         throw error
       } finally {
         try {
-          // Only retry an exact completed-result continuation after joining its
-          // cancelled process, before any new tool call could reach the client.
-          // Native actions cannot be proven side-effect-free, so never replay them.
+          // Retry an exact completed-result continuation after joining its cancelled
+          // or timed-out process, before any new tool call could reach the client.
+          // Client results are replayed as history, never executed again. Native
+          // actions cannot be proven side-effect-free, so never replay them.
           const suffix = body.messages.slice(body.messages.findLastIndex(message => message.role === "assistant") + 1)
-          if (status === 499 && !emittedTool && !runtime.options.allowNativeBrowser && !runtime.options.allowNativeSubagents && suffix.flatMap(blocks).some(block => block.type === "tool_result")) {
+          if ((status === 499 || status === 504) && !emittedTool && !runtime.options.allowNativeBrowser && !runtime.options.allowNativeSubagents && suffix.flatMap(blocks).some(block => block.type === "tool_result")) {
             await runtime.recordInterruptedAfterJoin(body, run.settled)
           }
           const metric = { conversationId: run.conversationId ?? run.id, continuation: run.continuation, requestId: id, timestamp: started, durationMs: Date.now() - started, model: body.model, status, error: failure, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, cacheReadTokens: usage.cache_read_input_tokens }

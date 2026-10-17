@@ -207,7 +207,7 @@ directories. Meridian does not edit or garbage-collect those private records.
 | `MERIDIAN_AGY_ALLOW_NATIVE_SUBAGENTS` | off | Guarded native self/research subagent opt-in |
 | `MERIDIAN_AGY_WHISPER_MODEL` | unset | Local whisper.cpp model for audio transcription |
 | `MERIDIAN_AGY_MAX_CONCURRENT` | `4` | Maximum live processes; idle pending tools can yield capacity |
-| `MERIDIAN_AGY_TURN_TIMEOUT_MS` | `300000` | Per-turn deadline, including preprocessing and tool waits |
+| `MERIDIAN_AGY_TURN_TIMEOUT_MS` | `300000` | Per-response model deadline, renewed after each accepted client result; excludes client tool execution |
 | `MERIDIAN_AGY_TOOL_TIMEOUT_MS` | `60000` | Pending result deadline and completed-conversation idle retention |
 | `MERIDIAN_AGY_IDLE_TIMEOUT_MS` | tool timeout | Idle retention of a completed live conversation, separate from the tool deadline |
 | `MERIDIAN_AGY_ACCEPT_VERSIONS` | unset | Comma-separated extra `agy` versions you have validated yourself |

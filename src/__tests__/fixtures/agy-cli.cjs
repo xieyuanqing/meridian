@@ -50,6 +50,7 @@ async function main(inputPrompt) {
     if (agent !== 'meridian-client' || !/^tools:\n {2}- view_file$/m.test(readFileSync('.agents/agents/meridian-client.md', 'utf8'))) throw new Error('Lean agent missing')
   }
   if (prompt.includes('DEFAULT_AGENT_PROBE') && args.includes('--agent')) throw new Error('Unexpected agent override')
+  if (prompt.includes('HTTP_BUDGET_PROBE') && args[args.indexOf('--print-timeout') + 1] !== '0') throw new Error('CLI must not impose a cumulative tool-chain timeout')
   emit({ event: 'init', ...(process.env.AGY_FIXTURE_CONVERSATION ? { conversation_id: args.includes('--conversation') ? args[args.indexOf('--conversation') + 1] : process.env.AGY_FIXTURE_CONVERSATION } : {}) })
   if (prompt.includes('RATE_LIMIT')) return emit({event:'result',result:{status:'ERROR',error:'Quota exhausted; retry in 45 seconds'}})
   if (prompt.includes('HANG')) { setInterval(() => {}, 1000); return }
@@ -115,13 +116,22 @@ async function main(inputPrompt) {
   }
   const history = JSON.parse(prompt.split('Client conversation:\n').at(-1))
   const lastContent = history.at(-1).content
-  const replayedResults = Array.isArray(lastContent) ? lastContent.filter(b => b.type === 'tool_result') : []
+  const replayedResults = history.slice(history.findLastIndex(m => m.role === 'assistant') + 1).flatMap(m => Array.isArray(m.content) ? m.content.filter(b => b.type === 'tool_result') : [])
   let answer = replayedResults.length ? replayedResults.map(b => (b.is_error ? 'FAILED:' : '') + b.content).join('|') : 'READY'
   if (!replayedResults.length && tools.length && !prompt.includes("SKIP_TOOLS")) {
     emit({ event: 'step_update', step_update: { state: 'DONE', step_type: 'agent_response', usage: { input_tokens: 100, output_tokens: 5 } } })
     const calls = Array.from({ length: prompt.includes('PARALLEL2') ? 2 : 1 }, (_, n) => rpc('tools/call', { name: tools[0].name, arguments: { key: `probe${n}` } }))
     if (prompt.includes('RPC_RETRY')) calls.push(rpc('tools/call', {name:tools[0].name,arguments:{key:'probe0'}},2))
     const results = await Promise.all(calls)
+    if (prompt.includes('TIMEOUT_AFTER_RESULT')) { setInterval(() => {}, 1000); return }
+    if (prompt.includes('TIMED_CHAIN')) {
+      for (let n = 0; n < 2; n++) {
+        await new Promise(resolve => setTimeout(resolve, 250))
+        await rpc('tools/call', { name: tools[0].name, arguments: { key: `chain${n}` } })
+      }
+      await new Promise(resolve => setTimeout(resolve, 250))
+      if (prompt.includes('TIMEOUT_CHAIN')) { setInterval(() => {}, 1000); return }
+    }
     if (prompt.includes('NEXT_TOOL')) await rpc('tools/call', { name: tools[0].name, arguments: { key: 'next' } })
     if (prompt.includes('STEERING')) {
       const followup = JSON.parse(results[0].content[0].text).meridian_client_followup
