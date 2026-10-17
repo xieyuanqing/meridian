@@ -132,11 +132,13 @@ export class AntigravityRun {
     const native = agNativeTools(this.runtime.options)
     return renderAgPrompt(request, native) + (this.runtime.options.allowNativeBrowser ? "\nFor browser work, invoke_subagent with TypeName browser and Workspace inherit. Its chrome_devtools MCP tools are enabled; ordinary self agents may not have that browser tool catalog." : "")
   }
+  private armResponseDeadline(): void {
+    clearTimeout(this.timer)
+    this.timer = setTimeout(() => this.abort(new AntigravityError("Antigravity turn timed out", 504, "api_error")), this.runtime.turnTimeoutMs)
+    this.timer.unref()
+  }
   async start(): Promise<void> {
-      if (!this.spare) {
-        this.timer = setTimeout(() => this.abort(new AntigravityError("Antigravity turn timed out", 504, "api_error")), this.runtime.turnTimeoutMs)
-        this.timer.unref()
-      }
+    if (!this.spare) this.armResponseDeadline()
     try {
       await this.grammars.prepare()
       this.workspace = this.restored?.workspace ?? await realpath(await mkdtemp(this.runtime.nativeSessions ? join(this.runtime.nativeSessions.directory, "conversation-") : join(tmpdir(), "meridian-agy-")))
@@ -160,7 +162,7 @@ export class AntigravityRun {
         } } : {}),
       } }))
       if (this.stopped) { await this.cleanup(); return }
-      const args = [...(this.restored ? ["--conversation", this.restored.conversationId] : ["--new-project"]), "--add-dir", this.workspace, "--input-format", "stream-json", "--model", this.request.model, "--output-format", "stream-json", "--print-timeout", `${Math.ceil(this.runtime.turnTimeoutMs / 1000)}s`, "--disable-slash-commands", "--sandbox"]
+      const args = [...(this.restored ? ["--conversation", this.restored.conversationId] : ["--new-project"]), "--add-dir", this.workspace, "--input-format", "stream-json", "--model", this.request.model, "--output-format", "stream-json", "--print-timeout", "0", "--disable-slash-commands", "--sandbox"]
       if (this.request.output_config?.format) {
         const schemaPath = join(this.workspace, "output-schema.json")
         await writeFile(schemaPath, JSON.stringify(agUpstreamSchema(this.request.output_config.format.schema)))
@@ -337,8 +339,7 @@ export class AntigravityRun {
     this.busy = true
     this.idle = false
     clearTimeout(this.pendingTimer)
-    this.timer = setTimeout(() => this.abort(new AntigravityError("Antigravity turn timed out", 504, "api_error")), this.runtime.turnTimeoutMs)
-    this.timer.unref()
+    this.armResponseDeadline()
     const cancel = () => this.abort(new AntigravityError("Request cancelled", 499, "api_error"))
     signal?.addEventListener("abort", cancel, { once: true })
     if (signal?.aborted) cancel()
@@ -371,8 +372,7 @@ export class AntigravityRun {
     this.busy = true
     this.idle = false
     clearTimeout(this.pendingTimer)
-    this.timer = setTimeout(() => this.abort(new AntigravityError("Antigravity turn timed out", 504, "api_error")), this.runtime.turnTimeoutMs)
-    this.timer.unref()
+    this.armResponseDeadline()
     const cancel = () => this.abort(new AntigravityError("Request cancelled", 499, "api_error"))
     signal?.addEventListener("abort", cancel, { once: true })
     if (signal?.aborted) cancel()
@@ -393,6 +393,10 @@ export class AntigravityRun {
     } finally { signal?.removeEventListener("abort", cancel) }
   }
   markDelivered(calls: AgCall[]): void {
+    // Model generation is done for this HTTP response. Client-owned execution
+    // has its own deadline and must not consume the next response's budget.
+    clearTimeout(this.timer)
+    clearTimeout(this.pendingTimer)
     this.delivered = calls
     this.pendingTimer = setTimeout(() => this.abort(new AntigravityError("Client tool result deadline expired; completed history can be replayed", 409, "invalid_request_error")), this.runtime.pendingToolTimeoutMs)
     this.pendingTimer.unref()
@@ -415,6 +419,7 @@ export class AntigravityRun {
     const messages = await this.attachments!.messages(clientMessages)
     if (this.stopped || results.some(result => !this.pending.has(result.tool_use_id))) throw new AntigravityError("Tool result was not requested by this turn", 409)
     clearTimeout(this.pendingTimer)
+    this.armResponseDeadline()
     this.delivered = []
     for (let index = 0; index < results.length; index++) {
       const result = results[index]!

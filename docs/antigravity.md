@@ -207,10 +207,10 @@ directories. Meridian does not edit or garbage-collect those private records.
 | `MERIDIAN_AGY_ALLOW_NATIVE_SUBAGENTS` | off | Guarded native self/research subagent opt-in |
 | `MERIDIAN_AGY_WHISPER_MODEL` | unset | Local whisper.cpp model for audio transcription |
 | `MERIDIAN_AGY_MAX_CONCURRENT` | `4` | Maximum live processes; idle pending tools can yield capacity |
-| `MERIDIAN_AGY_TURN_TIMEOUT_MS` | `300000` | Per-turn deadline, including preprocessing and tool waits |
+| `MERIDIAN_AGY_TURN_TIMEOUT_MS` | `300000` | Per-response model deadline, renewed after each accepted client result; excludes client tool execution |
 | `MERIDIAN_AGY_TOOL_TIMEOUT_MS` | `60000` | Pending client tool-result deadline |
 | `MERIDIAN_AGY_IDLE_CONVERSATION_MS` | tool timeout | `MERIDIAN_AGY_IDLE_TIMEOUT_MS` is accepted as an alias. How long a completed conversation keeps its live process for the next turn (explicit values: 1–86400000); afterwards that turn replays the full history. Unset preserves the existing tool timeout, including values above this new option's limit. |
-| `MERIDIAN_AGY_MAX_PROMPT_BYTES` | `190000` | UTF-8 byte limit of one prompt sent to agy, which keeps only about 192,000 bytes of an input step and drops the rest (the newest messages). Past it the oldest large tool results, arguments and text are shortened, the newest last; a current request that alone does not fit returns 400 `prompt is too long`. `0` disables it. |
+| `MERIDIAN_AGY_MAX_PROMPT_BYTES` | ignored | Not used by this fork: rather than shortening older content, a prompt longer than `MERIDIAN_AGY_MESSAGE_BYTES` is delivered whole as several CLI messages, and one past `MERIDIAN_AGY_REQUEST_BYTES` returns 400 `prompt is too long`. |
 | `MERIDIAN_AGY_ACCEPT_VERSIONS` | unset | Comma-separated extra `agy` versions you have validated yourself |
 | `MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS` | `0` | Reuse a successful version/configuration check for this long; `0` checks every admission |
 | `MERIDIAN_AGY_MODELS_TTL_MS` | `60000` | Account model list cache lifetime |
