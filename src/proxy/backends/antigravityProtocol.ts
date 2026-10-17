@@ -146,6 +146,42 @@ export function historyKey(messages: AgMessage[]): string {
   // this, every new user turn of such a client misses its live conversation.
   return stable(messages.map(m => ({ role: m.role, content: m.role === "assistant" ? blocks(m).map(b => b.type === "text" ? { ...b, text: b.text.trim() } : b).filter(b => b.type !== "text" || b.text) : blocks(m) })))
 }
+/**
+ * Hermes persists one multi-entry call as consecutive same-name tool_use blocks:
+ * the first keeps the delivered ID and each carries a slice of `calls`. When the
+ * client's assistant message is exactly such a split of the delivered batch,
+ * fold the children's results back into one result per delivered call so the
+ * live process can continue. Anything else returns undefined.
+ */
+export function mergeExpandedAgBatch(delivered: AgCall[], sent: AgMessage | undefined, client: AgMessage, results: AgResult[]): AgResult[] | undefined {
+  const withoutCalls = (m: AgMessage) => historyKey([{ ...m, content: blocks(m).filter(b => b.type !== "tool_use") }])
+  if (!sent || sent.role !== "assistant" || client.role !== "assistant" || withoutCalls(sent) !== withoutCalls(client)) return undefined
+  const uses = blocks(client).filter((b): b is AgCall => b.type === "tool_use")
+  const ids = new Set(delivered.map(call => call.id))
+  const resultFor = new Map(results.map(result => [result.tool_use_id, result]))
+  if (resultFor.size !== uses.length || uses.some(use => !resultFor.has(use.id))) return undefined
+  const merged: AgResult[] = []
+  for (let i = 0; i < uses.length;) {
+    const call = delivered.find(d => d.id === uses[i]!.id)
+    if (!call) return undefined
+    const group = [uses[i++]!]
+    while (i < uses.length && !ids.has(uses[i]!.id) && uses[i]!.name === call.name) group.push(uses[i++]!)
+    if (group.length === 1) {
+      if (stable(group[0]!.input) !== stable(call.input)) return undefined
+      merged.push(resultFor.get(call.id)!)
+      continue
+    }
+    const entries = group.map(use => use.input.calls)
+    if (!Array.isArray(call.input.calls) || entries.some(e => !Array.isArray(e)) || stable(call.input.calls) !== stable(entries.flat())) return undefined
+    const parts = group.map(use => resultFor.get(use.id)!)
+    const content = parts.flatMap((part, n) => [
+      { type: "text" as const, text: `[entry ${n + 1} of ${parts.length}]` },
+      ...(part.content === undefined ? [] : typeof part.content === "string" ? [{ type: "text" as const, text: part.content }] : part.content),
+    ])
+    merged.push({ type: "tool_result", tool_use_id: call.id, content, ...(parts.every(part => part.is_error) ? { is_error: true } : {}) })
+  }
+  return merged.length === delivered.length ? merged : undefined
+}
 /** The CLI keeps the first 192,000 bytes of a user message and silently drops the rest. */
 export const AG_CLI_MESSAGE_BYTES = 192_000
 const AG_PART_FRAME_BYTES = 512
