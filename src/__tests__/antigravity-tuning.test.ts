@@ -34,7 +34,7 @@ afterEach(async () => { for (const close of closing.splice(0)) await close() })
 
 describe("Antigravity operator tuning", () => {
   it("reads the tuning environment without changing defaults", () => {
-    const keys = ["MERIDIAN_AGY_ACCEPT_VERSIONS", "MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS", "MERIDIAN_AGY_MODELS_TTL_MS", "MERIDIAN_AGY_IDLE_TIMEOUT_MS", "MERIDIAN_AGY_LEAN_AGENT", "MERIDIAN_AGY_PREWARM", "MERIDIAN_AGY_PREWARM_TTL_MS"]
+    const keys = ["MERIDIAN_AGY_ACCEPT_VERSIONS", "MERIDIAN_AGY_ACCOUNT_CHECK_TTL_MS", "MERIDIAN_AGY_MODELS_TTL_MS", "MERIDIAN_AGY_IDLE_TIMEOUT_MS", "MERIDIAN_AGY_LEAN_AGENT", "MERIDIAN_AGY_PREWARM", "MERIDIAN_AGY_PREWARM_TTL_MS", "MERIDIAN_AGY_IDLE_CONVERSATION_MS"]
     const saved = keys.map(key => process.env[key])
     try {
       for (const key of keys) delete process.env[key]
@@ -44,8 +44,10 @@ describe("Antigravity operator tuning", () => {
       const tuned = new AntigravityRuntime(resolveBackendConfig({ backend: "antigravity" }).antigravity)
       expect(tuned.options.acceptedCliVersions).toEqual(["1.3.3", "1.3.4"])
       expect([tuned.accountCheckTtlMs, tuned.modelsTtlMs, tuned.prewarmCount, tuned.idleConversationMs, tuned.prewarmTtlMs, tuned.options.leanAgent]).toEqual([600_000, 900_000, 1, 300_000, 120_000, true])
+      process.env.MERIDIAN_AGY_IDLE_CONVERSATION_MS = "450000"
+      expect(new AntigravityRuntime(resolveBackendConfig({ backend: "antigravity" }).antigravity).idleConversationMs).toBe(450_000)
       expect(() => new AntigravityRuntime({ prewarm: -1 })).toThrow("non-negative")
-      expect(() => new AntigravityRuntime({ idleConversationMs: 0 })).toThrow("positive")
+      expect(() => new AntigravityRuntime({ idleConversationMs: 0 })).toThrow("idle conversation time")
     } finally {
       keys.forEach((key, index) => { if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index] })
     }

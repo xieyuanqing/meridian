@@ -458,9 +458,10 @@ describe.skipIf(process.platform === "win32")("Antigravity HTTP/CLI integration"
     // Above Linux's 128 KiB single-argument limit, below the byte limit past which agy drops the end of a prompt.
     expect((await send({ ...initial("a".repeat(150000)), tools: [] })).status).toBe(200)
   })
-  it("rejects a current request agy would silently cut short with a 400 instead of answering from part of it", async () => {
+  it("delivers a current request past agy's cut in parts and rejects one past the request limit with a 400", async () => {
     const { send } = fixture()
-    const response = await send({ ...initial("a".repeat(200000)), tools: [] })
+    expect((await send({ ...initial("a".repeat(200000)), tools: [] })).status).toBe(200)
+    const response = await send({ ...initial("a".repeat(700000)), tools: [] })
     expect(response.status).toBe(400)
     expect(JSON.stringify(await response.json())).toMatch(/prompt is too long/)
   })
