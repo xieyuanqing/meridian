@@ -7,6 +7,7 @@ import { createAntigravityServer } from "../proxy/backends/antigravity"
 import { AntigravityRuntime } from "../proxy/backends/antigravityRuntime"
 import { DEFAULT_PROXY_CONFIG, resolveBackendConfig } from "../proxy/types"
 import { dropAgSamplingControls } from "../proxy/backends/antigravityProtocol"
+import { agSavedOutputAllowed } from "../proxy/backends/antigravityNative"
 
 type TestReply = { content: Array<{ type: string; text?: string; id?: string; name?: string }>; stop_reason?: string }
 async function decode(response: Response): Promise<TestReply> { return await response.json() as TestReply }
@@ -322,5 +323,22 @@ describe("Antigravity prewarmed processes", () => {
     await server.closeBackend()
     expect(runtime.runs.size).toBe(0)
     expect(runtime.failed).toBe(0)
+  })
+})
+
+describe("Antigravity saved tool output reads", () => {
+  const id = "f52fd509-869f-40d2-a62b-b6347f359507"
+  const brain = `/var/lib/meridian/.gemini/antigravity-cli/brain/${id}`
+  const saved = `${brain}/.system_generated/steps/2/output.txt`
+  const read = (name: string, args: Record<string, unknown>, conversationId = id) => agSavedOutputAllowed({ conversationId, artifactDirectoryPath: brain, toolCall: { name, args } })
+  it("lets view_file and agy 1.5's read_file read back only this conversation's saved step output", () => {
+    expect(read("view_file", { AbsolutePath: saved })).toBe(true)
+    expect(read("read_file", { Path: saved, StartLine: 1 })).toBe(true)
+    expect(read("read_file", { AbsolutePath: saved })).toBe(false)
+    expect(read("view_file", { Path: saved })).toBe(false)
+    expect(read("read_file", { Path: `${brain}/.system_generated/steps/2/../../logs/transcript_full.jsonl` })).toBe(false)
+    expect(read("read_file", { Path: "/etc/meridian/meridian.env" })).toBe(false)
+    expect(read("read_file", { Path: saved }, "71743643-829c-43ee-9bab-1966948a8835")).toBe(false)
+    expect(read("write_file", { Path: saved })).toBe(false)
   })
 })

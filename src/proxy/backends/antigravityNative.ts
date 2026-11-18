@@ -14,9 +14,10 @@ export function agNativeTools(options: { allowNativeBrowser?: boolean; allowNati
  */
 export function agSavedOutputAllowed(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return false
-  const { conversationId, artifactDirectoryPath, toolCall } = payload as { conversationId?: unknown; artifactDirectoryPath?: unknown; toolCall?: { name?: unknown; args?: { AbsolutePath?: unknown } } }
-  const path = toolCall?.args?.AbsolutePath
-  if (toolCall?.name !== 'view_file' || typeof path !== 'string' || typeof artifactDirectoryPath !== 'string' || typeof conversationId !== 'string') return false
+  const { conversationId, artifactDirectoryPath, toolCall } = payload as { conversationId?: unknown; artifactDirectoryPath?: unknown; toolCall?: { name?: unknown; args?: { AbsolutePath?: unknown; Path?: unknown } } }
+  // agy 1.5 adds read_file (Path, StartLine, EndLine) beside view_file (AbsolutePath); either may read it back.
+  const path = toolCall?.name === 'read_file' ? toolCall?.args?.Path : toolCall?.args?.AbsolutePath
+  if ((toolCall?.name !== 'view_file' && toolCall?.name !== 'read_file') || typeof path !== 'string' || typeof artifactDirectoryPath !== 'string' || typeof conversationId !== 'string') return false
   if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(conversationId) || !artifactDirectoryPath.endsWith('/brain/' + conversationId)) return false
   const steps = artifactDirectoryPath + '/.system_generated/steps/'
   return path.startsWith(steps) && /^\d+\/output\.txt$/.test(path.slice(steps.length))
